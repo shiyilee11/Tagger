@@ -121,6 +121,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .mode-switch { height: 31px; display: inline-flex; align-items: center; gap: 7px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 11px; }
 .mode-switch:hover { border-color: var(--blue); color: var(--blue); }
 .mode-switch kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 4px; border-radius: 4px; background: var(--surface-muted); color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.save-button { height: 31px; display: inline-flex; align-items: center; gap: 7px; padding: 0 9px; border: 1px solid var(--blue); border-radius: 6px; background: var(--blue); color: #fff; font-size: 11px; }
+.save-button:hover { background: #0054d9; }
+.save-button kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 4px; border-radius: 4px; background: rgba(255,255,255,.18); color: #fff; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .small-button { height: 31px; padding: 0 8px; border-radius: 6px; background: transparent; color: var(--muted); font-size: 11px; }
 .small-button:hover { background: var(--surface-muted); color: var(--text); }
 .small-button.active { background: var(--blue-soft); color: var(--blue); }
@@ -289,7 +292,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .link-button { display: block; width: 100%; margin-top: 9px; background: transparent; color: var(--muted); font-size: 11px; }
 .link-button:hover { color: var(--blue); }
 
-.toast { position: fixed; left: 50%; bottom: 20px; z-index: 20; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.14); color: var(--text); font-size: 11px; transform: translateX(-50%); }
+.toast { position: fixed; left: 50%; bottom: 20px; z-index: 20; max-width: min(80vw, 720px); overflow: hidden; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.14); color: var(--text); font-size: 11px; text-overflow: ellipsis; transform: translateX(-50%); white-space: nowrap; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.3); }
 .modal { width: min(100%, 450px); padding: 19px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 18px 60px rgba(0,0,0,.2); }
 .export-modal { width: min(100%, 720px); }
@@ -351,6 +354,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   .bar-actions > .small-button { display: none; }
   .mode-switch { padding: 0 5px; gap: 3px; font-size: 10px; }
   .mode-switch kbd { display: none; }
+  .save-button { padding: 0 7px; font-size: 10px; }
+  .save-button kbd { display: none; }
   .search-box { width: 120px; }
   .data-footer { padding: 0 10px; }
   .data-footer span:nth-last-child(-n+2) { display: none; }

@@ -892,6 +892,19 @@ function App() {
   const historyRef = useRef<WorkspaceSnapshot[]>([]);
   const futureRef = useRef<WorkspaceSnapshot[]>([]);
   const savedSnapshotRef = useRef<WorkspaceSnapshot | null>(null);
+  const desktopWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const enqueueDesktopWrite = useCallback(
+    <T,>(operation: () => Promise<T>) => {
+      const next = desktopWriteQueueRef.current.then(operation, operation);
+      desktopWriteQueueRef.current = next.then(
+        () => undefined,
+        () => undefined,
+      );
+      return next;
+    },
+    [],
+  );
 
   const tagList = useMemo(() => Object.values(tags), [tags]);
   const storageKey = fileName ? `tagger-workspace:${fileName}` : "";
@@ -1707,23 +1720,44 @@ function App() {
       if (isSaving) return false;
       setIsSaving(true);
       try {
-        const filtersToSave = cloneFilters(getCurrentFilters());
-        if (isDesktop() && filePath) {
-          await invoke("save_csv", {
-            csvPath: filePath,
-            headers: dataToSave.headers,
-            rows: dataToSave.rows,
-            delimiter,
+        let targetPath = filePath;
+        let targetFileName = fileName;
+        if (isDesktop() && !targetPath) {
+          const extension = delimiter === "\t" ? "tsv" : "csv";
+          targetPath = await saveNativeFileDialog({
+            title: "保存 CSV / TSV",
+            defaultPath: fileName,
+            filters: [
+              {
+                name: extension.toUpperCase(),
+                extensions: [extension],
+              },
+            ],
           });
-          await invoke("save_workspace", {
-            csvPath: filePath,
-            tags,
-            annotations,
+          if (!targetPath) return false;
+          targetFileName = await basename(targetPath);
+        }
+        const filtersToSave = cloneFilters(getCurrentFilters());
+        if (isDesktop() && targetPath) {
+          await enqueueDesktopWrite(async () => {
+            await invoke("save_csv", {
+              csvPath: targetPath,
+              headers: dataToSave.headers,
+              rows: dataToSave.rows,
+              delimiter,
+            });
+            await invoke("save_workspace", {
+              csvPath: targetPath,
+              tags,
+              annotations,
+            });
           });
         }
+        if (targetPath !== filePath) setFilePath(targetPath);
+        if (targetFileName !== fileName) setFileName(targetFileName);
         const snapshot: ArchiveSlot = {
-          fileName,
-          filePath,
+          fileName: targetFileName,
+          filePath: targetPath,
           delimiter,
           sizeBytes: fileSizeBytes || undefined,
           data: dataToSave,
@@ -1747,7 +1781,9 @@ function App() {
           filters: filtersToSave,
         };
         setIsDirty(false);
-        showNotice("已保存");
+        showNotice(
+          isDesktop() && targetPath ? `已保存：${targetPath}` : "已保存",
+        );
         return true;
       } catch (error) {
         showNotice(`保存失败：${String(error)}`);
@@ -1766,6 +1802,7 @@ function App() {
       fileSizeBytes,
       filePath,
       getCurrentFilters,
+      enqueueDesktopWrite,
       isSaving,
       persistArchives,
       persistBrowserState,
@@ -1773,6 +1810,83 @@ function App() {
       tags,
     ],
   );
+
+  const saveWorkspaceAs = async () => {
+    if (!data || !fileName || !isDesktop() || isSaving) return false;
+    const extension = delimiter === "\t" ? "tsv" : "csv";
+    let target: string | null;
+    try {
+      target = await saveNativeFileDialog({
+        title: "另存为 CSV / TSV",
+        defaultPath: fileName,
+        filters: [
+          {
+            name: extension.toUpperCase(),
+            extensions: [extension],
+          },
+        ],
+      });
+    } catch (error) {
+      showNotice(`保存失败：${String(error)}`);
+      return false;
+    }
+    if (!target) return false;
+
+    setIsSaving(true);
+    try {
+      const nextFileName = await basename(target);
+      const filtersToSave = cloneFilters(getCurrentFilters());
+      await enqueueDesktopWrite(async () => {
+        await invoke("save_csv", {
+          csvPath: target,
+          headers: data.headers,
+          rows: data.rows,
+          delimiter,
+        });
+        await invoke("save_workspace", {
+          csvPath: target,
+          tags,
+          annotations,
+        });
+      });
+
+      setFileName(nextFileName);
+      setFilePath(target);
+      const snapshot: ArchiveSlot = {
+        fileName: nextFileName,
+        filePath: target,
+        delimiter,
+        sizeBytes: fileSizeBytes || undefined,
+        data,
+        tags,
+        annotations,
+        filters: filtersToSave,
+        updatedAt: Date.now(),
+      };
+      if (archiveSlot !== null) {
+        const nextArchives = archives.map((item, index) =>
+          index === archiveSlot ? snapshot : item,
+        );
+        setArchives(nextArchives);
+        persistArchives(nextArchives);
+      }
+      persistBrowserState(tags, annotations, filtersToSave);
+      savedSnapshotRef.current = {
+        data: cloneData(data),
+        tags: cloneTags(tags),
+        annotations: cloneAnnotations(annotations),
+        filters: filtersToSave,
+      };
+      setIsDirty(false);
+      showNotice(`已保存：${target}`);
+      return true;
+    } catch (error) {
+      showNotice(`保存失败：${String(error)}`);
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const leaveWorkspace = () => {
     setArchiveScreen(false);
@@ -1821,16 +1935,18 @@ function App() {
       persistBrowserState(saved.tags, saved.annotations, saved.filters);
       if (isDesktop() && filePath) {
         try {
-          await invoke("save_csv", {
-            csvPath: filePath,
-            headers: saved.data.headers,
-            rows: saved.data.rows,
-            delimiter,
-          });
-          await invoke("save_workspace", {
-            csvPath: filePath,
-            tags: saved.tags,
-            annotations: saved.annotations,
+          await enqueueDesktopWrite(async () => {
+            await invoke("save_csv", {
+              csvPath: filePath,
+              headers: saved.data.headers,
+              rows: saved.data.rows,
+              delimiter,
+            });
+            await invoke("save_workspace", {
+              csvPath: filePath,
+              tags: saved.tags,
+              annotations: saved.annotations,
+            });
           });
         } catch (error) {
           showNotice(`恢复失败：${String(error)}`);
@@ -1969,8 +2085,9 @@ function App() {
     if (!isDesktop() || !filePath || !data) return;
     const calls: Promise<unknown>[] = [];
     const cell = (row: number, column: number) =>
-      calls.push(
-        invoke(
+        calls.push(
+        enqueueDesktopWrite(() =>
+          invoke(
           remove ? "remove_annotation" : "annotate_cell",
           remove
             ? {
@@ -1985,6 +2102,7 @@ function App() {
                 column: data.headers[column],
                 tagName,
               },
+          ),
         ),
       );
     if (scope === "cell" && selectedRange)
@@ -2000,7 +2118,8 @@ function App() {
     if (scope === "row")
       selectedRows.forEach((row) =>
         calls.push(
-          invoke(
+          enqueueDesktopWrite(() =>
+            invoke(
             remove ? "remove_annotation" : "annotate_row",
             remove
               ? {
@@ -2010,13 +2129,15 @@ function App() {
                   tagName,
                 }
               : { csvPath: filePath, rowId: `row-${row}`, tagName },
+            ),
           ),
         ),
       );
     if (scope === "column")
       selectedColumns.forEach((column) =>
         calls.push(
-          invoke(
+          enqueueDesktopWrite(() =>
+            invoke(
             remove ? "remove_annotation" : "annotate_column",
             remove
               ? {
@@ -2026,12 +2147,14 @@ function App() {
                   tagName,
                 }
               : { csvPath: filePath, column: data.headers[column], tagName },
+            ),
           ),
         ),
       );
     if (scope === "dataset")
       calls.push(
-        invoke(
+        enqueueDesktopWrite(() =>
+          invoke(
           remove ? "remove_annotation" : "annotate_dataset",
           remove
             ? {
@@ -2041,6 +2164,7 @@ function App() {
                 tagName,
               }
             : { csvPath: filePath, tagName },
+          ),
         ),
       );
     await Promise.all(calls);
@@ -2106,6 +2230,7 @@ function App() {
       selectedRows,
       showNotice,
       tags,
+      enqueueDesktopWrite,
     ],
   );
 
@@ -2149,13 +2274,20 @@ function App() {
     setIsDirty(true);
     persistBrowserState(nextTags, nextAnnotations);
     if (isDesktop() && filePath) {
-      if (originalName)
-        await invoke("update_tag", {
-          csvPath: filePath,
-          oldName: originalName,
-          ...nextTag,
-        });
-      else await invoke("create_tag", { csvPath: filePath, ...nextTag });
+      try {
+        await enqueueDesktopWrite(() =>
+          originalName
+            ? invoke("update_tag", {
+                csvPath: filePath,
+                oldName: originalName,
+                ...nextTag,
+              })
+            : invoke("create_tag", { csvPath: filePath, ...nextTag }),
+        );
+      } catch (error) {
+        showNotice(`保存失败：${String(error)}`);
+        return;
+      }
     }
     setShowTagDialog(false);
     setCapturingShortcut(null);
@@ -2191,13 +2323,33 @@ function App() {
         ].filter((item) => item !== name);
       }),
     );
+    if (isDesktop() && filePath) {
+      try {
+        await enqueueDesktopWrite(() =>
+          invoke("save_workspace", {
+            csvPath: filePath,
+            tags: nextTags,
+            annotations: nextAnnotations,
+          }),
+        );
+      } catch (error) {
+        showNotice(`删除失败：${String(error)}`);
+        return;
+      }
+    }
     rememberChange();
     setTags(nextTags);
     setAnnotations(nextAnnotations);
     setIsDirty(true);
     persistBrowserState(nextTags, nextAnnotations);
-    if (isDesktop() && filePath)
-      await invoke("delete_tag", { csvPath: filePath, name });
+    setShowTagDialog(false);
+    setCapturingShortcut(null);
+    setTagDraft({
+      name: "",
+      definition: "",
+      color: TAG_COLORS[tagList.length % TAG_COLORS.length],
+      shortcut: String(Math.min(tagList.length + 1, 9)),
+    });
   };
 
   const updateShortcut = useCallback(
@@ -2211,9 +2363,22 @@ function App() {
       setIsDirty(true);
       persistBrowserState(nextTags, annotations);
       if (isDesktop() && filePath)
-        await invoke("create_tag", { csvPath: filePath, ...nextTag });
+        try {
+          await enqueueDesktopWrite(() =>
+            invoke("create_tag", { csvPath: filePath, ...nextTag }),
+          );
+        } catch (error) {
+          showNotice(`保存失败：${String(error)}`);
+        }
     },
-    [annotations, filePath, persistBrowserState, tags],
+    [
+      annotations,
+      enqueueDesktopWrite,
+      filePath,
+      persistBrowserState,
+      showNotice,
+      tags,
+    ],
   );
 
   useEffect(() => {
@@ -2297,18 +2462,17 @@ function App() {
       setIsDirty(true);
       persistBrowserState(nextTags, nextAnnotations);
       if (isDesktop() && filePath) {
-        if (imported.hasAnnotations)
-          await invoke("save_workspace", {
-            csvPath: filePath,
-            tags: nextTags,
-            annotations: nextAnnotations,
-          });
-        else
-          await Promise.all(
-            Object.values(imported.tags).map((tag) =>
-              invoke("create_tag", { csvPath: filePath, ...tag }),
-            ),
-          );
+        await enqueueDesktopWrite(async () => {
+          if (imported.hasAnnotations)
+            await invoke("save_workspace", {
+              csvPath: filePath,
+              tags: nextTags,
+              annotations: nextAnnotations,
+            });
+          else
+            for (const tag of Object.values(imported.tags))
+              await invoke("create_tag", { csvPath: filePath, ...tag });
+        });
       }
     } catch (error) {
       showNotice(`标签文件无效：${String(error)}`);
@@ -3382,7 +3546,7 @@ function App() {
                     <h3>存档与保存</h3>
                     <p>每个文件占一个存档位；编辑中的内容会同步到当前存档，<kbd>⌘/Ctrl+S</kbd> 可立即保存。</p>
                     <p><b>浏览器</b> 使用当前网站的浏览器存储（localStorage / IndexedDB）。刷新通常会保留；清除网站数据、无痕窗口关闭、换浏览器或换设备可能丢失，请导出 ZIP 备份。</p>
-                    <p><b>桌面</b> 点击导入选择原文件后，保存会写回原 CSV/TSV，并在同目录生成 <code>文件名.tags.json</code>。存档槽仍保存在应用本地数据中；清除应用数据会清空存档槽，但不会替你删除原文件。</p>
+                    <p><b>桌面</b> “保存”或 <kbd>⌘/Ctrl+S</kbd> 会写回当前 CSV/TSV，并在同目录生成 <code>文件名.tags.json</code>；“另存为”可选择新位置，成功后会显示完整路径。存档槽仍保存在应用本地数据中；清除应用数据会清空存档槽，但不会替你删除原文件。</p>
                     <p>桌面拖入文件或从 ZIP 恢复的是存档副本，需通过导出得到文件；要保存回原 CSV，请使用导入按钮选择它。</p>
                   </section>
                   <section>
@@ -3664,6 +3828,25 @@ function App() {
                   {editorMode === "tagger" ? "标注模式" : "编辑模式"}
                   <kbd>⇧+L</kbd>
                 </button>
+                <button
+                  className="save-button"
+                  onClick={() => void saveWorkspace()}
+                  disabled={isSaving}
+                  title="保存当前工作区（⌘/Ctrl+S）"
+                >
+                  {isSaving ? "保存中…" : "保存"}
+                  <kbd>⌘S</kbd>
+                </button>
+                {isDesktop() && (
+                  <button
+                    className="small-button"
+                    onClick={() => void saveWorkspaceAs()}
+                    disabled={isSaving}
+                    title="选择新的保存位置"
+                  >
+                    另存为
+                  </button>
+                )}
                 <label className="search-box">
                   <span>⌕</span>
                   <input
@@ -4501,10 +4684,7 @@ function App() {
               {tagDraft.originalName && (
                 <button
                   className="danger-button"
-                  onClick={() => {
-                    void handleDeleteTag(tagDraft.originalName!);
-                    setShowTagDialog(false);
-                  }}
+                  onClick={() => void handleDeleteTag(tagDraft.originalName!)}
                 >
                   删除
                 </button>

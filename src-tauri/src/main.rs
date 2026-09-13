@@ -4,6 +4,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+
+// Tauri commands can run concurrently; serialize the read-modify-write cycle
+// for the shared tags file so a late annotation cannot restore deleted data.
+static TAG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 // ──────────────────────────────────────────────
 // 数据类型
@@ -93,7 +98,10 @@ fn load_tags(csv_path: &str) -> TagsFile {
 
 fn save_tags(csv_path: &str, tags_file: &TagsFile) -> Result<(), String> {
     let json = serde_json::to_string_pretty(tags_file).map_err(|e| e.to_string())?;
-    std::fs::write(tags_path(csv_path), json).map_err(|e| e.to_string())
+    let path = tags_path(csv_path);
+    let temporary_path = format!("{path}.tmp");
+    std::fs::write(&temporary_path, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&temporary_path, &path).map_err(|e| e.to_string())
 }
 
 // ──────────────────────────────────────────────
@@ -170,6 +178,7 @@ fn save_workspace(
     tags: HashMap<String, Tag>,
     annotations: Annotations,
 ) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     save_tags(&csv_path, &TagsFile { version: 1, tags, annotations })
 }
 
@@ -193,6 +202,7 @@ fn create_tag(
     color: String,
     shortcut: String,
 ) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     tf.tags.insert(
         name.clone(),
@@ -215,6 +225,7 @@ fn update_tag(
     color: String,
     shortcut: String,
 ) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     if old_name != name {
         tf.tags.remove(&old_name);
@@ -244,6 +255,7 @@ fn update_tag(
 
 #[tauri::command]
 fn delete_tag(csv_path: String, name: String) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     tf.tags.remove(&name);
     // 同时移除所有标注中的该标签
@@ -264,6 +276,7 @@ fn delete_tag(csv_path: String, name: String) -> Result<(), String> {
 
 #[tauri::command]
 fn annotate_row(csv_path: String, row_id: String, tag_name: String) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     let entry = tf.annotations.rows.entry(row_id).or_default();
     if !entry.contains(&tag_name) {
@@ -279,6 +292,7 @@ fn annotate_cell(
     column: String,
     tag_name: String,
 ) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     let row_entry = tf.annotations.cells.entry(row_id).or_default();
     let col_entry = row_entry.entry(column).or_default();
@@ -290,6 +304,7 @@ fn annotate_cell(
 
 #[tauri::command]
 fn annotate_column(csv_path: String, column: String, tag_name: String) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     let entry = tf.annotations.columns.entry(column).or_default();
     if !entry.contains(&tag_name) {
@@ -300,6 +315,7 @@ fn annotate_column(csv_path: String, column: String, tag_name: String) -> Result
 
 #[tauri::command]
 fn annotate_dataset(csv_path: String, tag_name: String) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     if !tf.annotations.dataset.contains(&tag_name) {
         tf.annotations.dataset.push(tag_name);
@@ -314,6 +330,7 @@ fn remove_annotation(
     target: String,
     tag_name: String,
 ) -> Result<(), String> {
+    let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     match annotation_type.as_str() {
         "row" => {
@@ -382,6 +399,80 @@ fn export_for_ai(csv_path: String) -> Result<serde_json::Value, String> {
         "tag_definitions": tag_defs,
         "annotations": annotations
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn delete_tag_removes_definition_and_all_annotations() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "tagger-delete-tag-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("test directory should be created");
+        let csv_path = directory.join("sample.csv");
+        let csv_path = csv_path.to_string_lossy().into_owned();
+
+        let keep = Tag {
+            name: "keep".to_string(),
+            definition: "retain".to_string(),
+            color: "#2457ff".to_string(),
+            shortcut: "1".to_string(),
+        };
+        let remove = Tag {
+            name: "remove".to_string(),
+            definition: "discard".to_string(),
+            color: "#ef765b".to_string(),
+            shortcut: "2".to_string(),
+        };
+        let annotations = Annotations {
+            rows: HashMap::from([(
+                "row-0".to_string(),
+                vec!["remove".to_string(), "keep".to_string()],
+            )]),
+            cells: HashMap::from([(
+                "row-0".to_string(),
+                HashMap::from([(
+                    "name".to_string(),
+                    vec!["remove".to_string()],
+                )]),
+            )]),
+            columns: HashMap::from([(
+                "name".to_string(),
+                vec!["remove".to_string()],
+            )]),
+            dataset: vec!["remove".to_string()],
+        };
+        let tags = HashMap::from([(keep.name.clone(), keep), (remove.name.clone(), remove)]);
+        save_tags(
+            &csv_path,
+            &TagsFile {
+                version: 1,
+                tags,
+                annotations: annotations.clone(),
+            },
+        )
+        .expect("initial tags should be written");
+
+        delete_tag(csv_path.clone(), "remove".to_string()).expect("tag should be deleted");
+        let result = load_tags(&csv_path);
+
+        assert!(!result.tags.contains_key("remove"));
+        assert!(result.tags.contains_key("keep"));
+        assert_eq!(result.annotations.rows["row-0"], vec!["keep"]);
+        assert!(result.annotations.cells["row-0"]["name"].is_empty());
+        assert!(result.annotations.columns["name"].is_empty());
+        assert!(result.annotations.dataset.is_empty());
+
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }
 
 // ──────────────────────────────────────────────
