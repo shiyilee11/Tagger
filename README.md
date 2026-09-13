@@ -54,7 +54,7 @@ git clone https://github.com/your-username/tagger.git
 cd tagger
 
 # 直接用浏览器打开
-open tagger.html          # macOS
+npm run dev          # macOS
 # 或双击 tagger.html 文件
 ```
 
