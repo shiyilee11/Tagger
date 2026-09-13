@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  // 让 npm run build 后的 dist/index.html 可以直接用浏览器打开。
+  base: './',
   build: {
     outDir: 'dist',
     sourcemap: true,

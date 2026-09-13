@@ -7,8 +7,17 @@ import React, {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { basename } from "@tauri-apps/api/path";
-import { open as openNativeFileDialog } from "@tauri-apps/plugin-dialog";
-import { readFile, readTextFile, stat } from "@tauri-apps/plugin-fs";
+import {
+  open as openNativeFileDialog,
+  save as saveNativeFileDialog,
+} from "@tauri-apps/plugin-dialog";
+import {
+  readFile,
+  readTextFile,
+  stat,
+  writeFile,
+  writeTextFile,
+} from "@tauri-apps/plugin-fs";
 import type { Annotations, ParsedData, Tag } from "./types";
 import { parseDelimited, parseDelimitedFile as parseDelimitedFileOnMain } from "./csvParser";
 import "./App.css";
@@ -24,6 +33,14 @@ type CellRange = {
   endRow: number;
   endCol: number;
 };
+type ColumnValueFilterMode = "include" | "exclude";
+type WorkspaceFilters = {
+  hiddenColumns: number[];
+  columnFilters: Record<string, string>;
+  columnValueSelections: Record<string, string[]>;
+  columnValueFilterModes: Record<string, ColumnValueFilterMode>;
+  columnTagFilters: Record<string, string>;
+};
 type ArchiveSlot = {
   fileName: string;
   filePath: string | null;
@@ -32,14 +49,16 @@ type ArchiveSlot = {
   data: ParsedData;
   tags: Record<string, Tag>;
   annotations: Annotations;
+  filters: WorkspaceFilters;
   updatedAt: number;
 };
 type WorkspaceSnapshot = {
   data: ParsedData;
   tags: Record<string, Tag>;
   annotations: Annotations;
+  filters: WorkspaceFilters;
 };
-type WorkspaceState = Pick<WorkspaceSnapshot, "tags" | "annotations">;
+type WorkspaceState = Pick<WorkspaceSnapshot, "tags" | "annotations" | "filters">;
 type ArchiveImportPair = {
   fileName: string;
   file?: File;
@@ -55,7 +74,6 @@ type ParsedTagImport = {
   hasAnnotations: boolean;
 };
 type ArchiveImportMode = "new" | "restore";
-type ColumnValueFilterMode = "include" | "exclude";
 type EditorMode = "tagger" | "edit";
 type TagPanelDock = "left" | "right" | "top" | "bottom" | "floating";
 type TagPanelResizeAxis = "x" | "y";
@@ -118,6 +136,69 @@ const makeEmptyAnnotations = (): Annotations => ({
   columns: {},
   dataset: [],
 });
+const makeEmptyFilters = (): WorkspaceFilters => ({
+  hiddenColumns: [],
+  columnFilters: {},
+  columnValueSelections: {},
+  columnValueFilterModes: {},
+  columnTagFilters: {},
+});
+
+function normalizeFilters(value: unknown): WorkspaceFilters {
+  if (!value || typeof value !== "object") return makeEmptyFilters();
+  const source = value as Record<string, unknown>;
+  const toStringMap = (item: unknown) => {
+    if (!item || typeof item !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(item as Record<string, unknown>).flatMap(([key, entry]) =>
+        typeof entry === "string" ? [[key, entry]] : [],
+      ),
+    );
+  };
+  const toStringListMap = (item: unknown) => {
+    if (!item || typeof item !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(item as Record<string, unknown>).flatMap(([key, entry]) =>
+        Array.isArray(entry)
+          ? [[key, entry.filter((part): part is string => typeof part === "string")]]
+          : [],
+      ),
+    );
+  };
+  const rawHiddenColumns = Array.isArray(source.hiddenColumns)
+    ? source.hiddenColumns
+        .filter((column): column is number => Number.isInteger(column) && column >= 0)
+    : [];
+  const modes = toStringMap(source.columnValueFilterModes);
+  const columnValueFilterModes = Object.fromEntries(
+    Object.entries(modes).flatMap(([key, mode]) =>
+      mode === "exclude" || mode === "include" ? [[key, mode]] : [],
+    ),
+  ) as Record<string, ColumnValueFilterMode>;
+  return {
+    hiddenColumns: Array.from(new Set(rawHiddenColumns)),
+    columnFilters: toStringMap(source.columnFilters),
+    columnValueSelections: toStringListMap(source.columnValueSelections),
+    columnValueFilterModes,
+    columnTagFilters: toStringMap(source.columnTagFilters),
+  };
+}
+
+function cloneFilters(source: WorkspaceFilters | null | undefined) {
+  const normalized = normalizeFilters(source);
+  return {
+    hiddenColumns: [...normalized.hiddenColumns],
+    columnFilters: { ...normalized.columnFilters },
+    columnValueSelections: Object.fromEntries(
+      Object.entries(normalized.columnValueSelections).map(([key, values]) => [
+        key,
+        [...values],
+      ]),
+    ),
+    columnValueFilterModes: { ...normalized.columnValueFilterModes },
+    columnTagFilters: { ...normalized.columnTagFilters },
+  };
+}
 
 function initialArchives(): Array<ArchiveSlot | null> {
   if (typeof window === "undefined") return Array(10).fill(null);
@@ -249,6 +330,39 @@ function downloadBlob(name: string, blob: Blob) {
 
 function downloadFile(name: string, content: string, type: string) {
   downloadBlob(name, new Blob([content], { type }));
+}
+
+async function exportFile(
+  name: string,
+  content: string | Uint8Array,
+  type: string,
+  extension: string,
+) {
+  if (!isDesktop()) {
+    const browserContent =
+      typeof content === "string"
+        ? content
+        : (content.buffer.slice(
+            content.byteOffset,
+            content.byteOffset + content.byteLength,
+          ) as ArrayBuffer);
+    downloadBlob(
+      name,
+      new Blob([browserContent], {
+        type,
+      }),
+    );
+    return true;
+  }
+  const target = await saveNativeFileDialog({
+    title: "导出文件",
+    defaultPath: name,
+    filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
+  });
+  if (!target) return false;
+  if (typeof content === "string") await writeTextFile(target, content);
+  else await writeFile(target, content);
+  return true;
 }
 
 function serializeTagsExport(
@@ -755,6 +869,8 @@ function App() {
   const tagPanelDragRef = useRef<{
     offsetX: number;
     offsetY: number;
+    width: number;
+    height: number;
   } | null>(null);
   const tagPanelResizeRef = useRef<{
     axis: TagPanelResizeAxis;
@@ -779,15 +895,52 @@ function App() {
 
   const tagList = useMemo(() => Object.values(tags), [tags]);
   const storageKey = fileName ? `tagger-workspace:${fileName}` : "";
+  const getCurrentFilters = useCallback(
+    (): WorkspaceFilters => ({
+      hiddenColumns: Array.from(hiddenColumns).sort((a, b) => a - b),
+      columnFilters: { ...columnFilters },
+      columnValueSelections: Object.fromEntries(
+        Object.entries(columnValueSelections).map(([key, values]) => [
+          key,
+          [...values],
+        ]),
+      ),
+      columnValueFilterModes: { ...columnValueFilterModes },
+      columnTagFilters: { ...columnTagFilters },
+    }),
+    [
+      columnFilters,
+      columnTagFilters,
+      columnValueFilterModes,
+      columnValueSelections,
+      hiddenColumns,
+    ],
+  );
   const persistBrowserState = useCallback(
-    (nextTags: Record<string, Tag>, nextAnnotations: Annotations) => {
+    (
+      nextTags: Record<string, Tag>,
+      nextAnnotations: Annotations,
+      nextFilters: WorkspaceFilters = getCurrentFilters(),
+    ) => {
       if (storageKey)
         localStorage.setItem(
           storageKey,
-          JSON.stringify({ tags: nextTags, annotations: nextAnnotations }),
+          JSON.stringify({
+            tags: nextTags,
+            annotations: nextAnnotations,
+            filters: cloneFilters(nextFilters),
+          }),
         );
     },
-    [storageKey],
+    [
+      columnFilters,
+      columnTagFilters,
+      columnValueFilterModes,
+      columnValueSelections,
+      getCurrentFilters,
+      hiddenColumns,
+      storageKey,
+    ],
   );
   const persistArchives = useCallback(
     (next: Array<ArchiveSlot | null>) => {
@@ -827,11 +980,22 @@ function App() {
     const panel = tagPanelRef.current;
     if (!panel) return;
     const rect = panel.getBoundingClientRect();
+    const width = rect.width || tagPanelSize.width;
+    const height =
+      tagPanelDock === "left" || tagPanelDock === "right"
+        ? Math.max(300, tagPanelSize.height)
+        : rect.height || tagPanelSize.height;
     event.preventDefault();
     tagPanelDragRef.current = {
       offsetX: event.clientX - rect.left,
       offsetY: event.clientY - rect.top,
+      width,
+      height,
     };
+    setTagPanelSize((previous) => ({
+      width,
+      height,
+    }));
     tagPanelDockTargetRef.current = null;
     setIsTagPanelDragging(true);
     setTagPanelDockTarget(null);
@@ -871,7 +1035,9 @@ function App() {
     };
   }, []);
   useEffect(() => {
-    if (archivesReady) persistArchives(archives);
+    if (!archivesReady) return undefined;
+    const timer = window.setTimeout(() => persistArchives(archives), 220);
+    return () => window.clearTimeout(timer);
   }, [archives, archivesReady, persistArchives]);
   useEffect(() => {
     localStorage.setItem("tagger-theme", theme);
@@ -909,10 +1075,7 @@ function App() {
       }
       const drag = tagPanelDragRef.current;
       if (!drag) return;
-      const panel = tagPanelRef.current;
-      const rect = panel?.getBoundingClientRect();
-      const width = rect?.width ?? 290;
-      const height = rect?.height ?? 520;
+      const { width, height } = drag;
       const maxLeft = Math.max(10, window.innerWidth - width - 10);
       const maxTop = Math.max(58, window.innerHeight - height - 10);
       const nextLeft = Math.max(
@@ -923,17 +1086,23 @@ function App() {
         58,
         Math.min(maxTop, event.clientY - drag.offsetY),
       );
-      const edgeSize = 64;
-      const nearDock: Exclude<TagPanelDock, "floating"> | null =
-        event.clientX <= edgeSize
-          ? "left"
-          : event.clientX >= window.innerWidth - edgeSize
-            ? "right"
-            : event.clientY <= 52 + edgeSize
-              ? "top"
-              : event.clientY >= window.innerHeight - edgeSize
-                ? "bottom"
-                : null;
+      const edgeSize = 72;
+      const panelLeft = event.clientX - drag.offsetX;
+      const panelTop = event.clientY - drag.offsetY;
+      const panelRight = panelLeft + width;
+      const panelBottom = panelTop + height;
+      const edgeDistances: Array<{
+        dock: Exclude<TagPanelDock, "floating">;
+        distance: number;
+      }> = [
+        { dock: "left", distance: Math.max(0, panelLeft) },
+        { dock: "right", distance: Math.max(0, window.innerWidth - panelRight) },
+        { dock: "top", distance: Math.max(0, panelTop - 52) },
+        { dock: "bottom", distance: Math.max(0, window.innerHeight - panelBottom) },
+      ];
+      const nearDock = edgeDistances
+        .filter(({ distance }) => distance <= edgeSize)
+        .sort((left, right) => left.distance - right.distance)[0]?.dock ?? null;
       tagPanelDockTargetRef.current = nearDock;
       setTagPanelDock("floating");
       setTagPanelPosition({ left: nextLeft, top: nextTop });
@@ -955,11 +1124,30 @@ function App() {
     };
     window.addEventListener("mousemove", mouseMove);
     window.addEventListener("mouseup", mouseUp);
+    window.addEventListener("blur", mouseUp);
     return () => {
       window.removeEventListener("mousemove", mouseMove);
       window.removeEventListener("mouseup", mouseUp);
+      window.removeEventListener("blur", mouseUp);
     };
   }, []);
+
+  useEffect(() => {
+    if (tagPanelDock !== "floating") return undefined;
+    const panel = tagPanelRef.current;
+    if (!panel || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => {
+      const rect = panel.getBoundingClientRect();
+      setTagPanelSize((previous) =>
+        Math.abs(previous.width - rect.width) < 1 &&
+        Math.abs(previous.height - rect.height) < 1
+          ? previous
+          : { width: rect.width, height: rect.height },
+      );
+    });
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [tagPanelDock]);
 
   const loadWorkspaceState = useCallback(
     async (name: string, path: string | null): Promise<WorkspaceState> => {
@@ -973,7 +1161,11 @@ function App() {
         );
         setTags(nextTags);
         setAnnotations(loadedAnnotations);
-        return { tags: nextTags, annotations: loadedAnnotations };
+        return {
+          tags: nextTags,
+          annotations: loadedAnnotations,
+          filters: makeEmptyFilters(),
+        };
       }
       const saved = localStorage.getItem(`tagger-workspace:${name}`);
       if (saved) {
@@ -981,9 +1173,14 @@ function App() {
           const parsed = JSON.parse(saved);
           const nextTags = parsed.tags ?? {};
           const nextAnnotations = parsed.annotations ?? makeEmptyAnnotations();
+          const nextFilters = normalizeFilters(parsed.filters);
           setTags(nextTags);
           setAnnotations(nextAnnotations);
-          return { tags: nextTags, annotations: nextAnnotations };
+          return {
+            tags: nextTags,
+            annotations: nextAnnotations,
+            filters: nextFilters,
+          };
         } catch {
           localStorage.removeItem(`tagger-workspace:${name}`);
         }
@@ -992,7 +1189,7 @@ function App() {
       const nextAnnotations = makeEmptyAnnotations();
       setTags(nextTags);
       setAnnotations(nextAnnotations);
-      return { tags: nextTags, annotations: nextAnnotations };
+      return { tags: nextTags, annotations: nextAnnotations, filters: makeEmptyFilters() };
     },
     [],
   );
@@ -1033,10 +1230,17 @@ function App() {
       setOpenColumnFilter(null);
       setColumnWidths({});
       const loadedState = await loadWorkspaceState(name, path);
+      const loadedFilters = cloneFilters(loadedState.filters);
+      setHiddenColumns(new Set(loadedFilters.hiddenColumns));
+      setColumnFilters(loadedFilters.columnFilters);
+      setColumnValueSelections(loadedFilters.columnValueSelections);
+      setColumnValueFilterModes(loadedFilters.columnValueFilterModes);
+      setColumnTagFilters(loadedFilters.columnTagFilters);
       savedSnapshotRef.current = {
         data: cloneData(nextData),
         tags: cloneTags(loadedState.tags),
         annotations: cloneAnnotations(loadedState.annotations),
+        filters: loadedFilters,
       };
       setWorkspaceLoaded(true);
       setArchiveScreen(false);
@@ -1134,6 +1338,7 @@ function App() {
             data: importedData,
             tags: importedTags?.tags ?? {},
             annotations: importedTags?.annotations ?? makeEmptyAnnotations(),
+            filters: makeEmptyFilters(),
             updatedAt: Date.now(),
           };
           imported += 1;
@@ -1410,12 +1615,13 @@ function App() {
       setEditorMode("tagger");
       setCapturingShortcut(null);
       setGlobalValue("");
-      setHiddenColumns(new Set());
+      const savedFilters = cloneFilters(saved.filters);
+      setHiddenColumns(new Set(savedFilters.hiddenColumns));
       setShowColumnVisibility(false);
-      setColumnFilters({});
-      setColumnValueSelections({});
-      setColumnValueFilterModes({});
-      setColumnTagFilters({});
+      setColumnFilters(savedFilters.columnFilters);
+      setColumnValueSelections(savedFilters.columnValueSelections);
+      setColumnValueFilterModes(savedFilters.columnValueFilterModes);
+      setColumnTagFilters(savedFilters.columnTagFilters);
       setOpenColumnFilter(null);
       setSelectedRows(new Set());
       setSelectedColumns(new Set());
@@ -1424,6 +1630,7 @@ function App() {
         data: cloneData(saved.data),
         tags: cloneTags(saved.tags),
         annotations: cloneAnnotations(saved.annotations),
+        filters: savedFilters,
       };
       setArchiveSlot(slot);
       setWorkspaceLoaded(true);
@@ -1462,9 +1669,11 @@ function App() {
   const currentSnapshot = (): WorkspaceSnapshot | null =>
     data
       ? {
-          data: cloneData(data),
+          // Data updates are immutable, so history can share this large table safely.
+          data,
           tags: cloneTags(tags),
           annotations: cloneAnnotations(annotations),
+          filters: cloneFilters(getCurrentFilters()),
         }
       : null;
   const rememberChange = () => {
@@ -1498,6 +1707,7 @@ function App() {
       if (isSaving) return false;
       setIsSaving(true);
       try {
+        const filtersToSave = cloneFilters(getCurrentFilters());
         if (isDesktop() && filePath) {
           await invoke("save_csv", {
             csvPath: filePath,
@@ -1519,6 +1729,7 @@ function App() {
           data: dataToSave,
           tags,
           annotations,
+          filters: filtersToSave,
           updatedAt: Date.now(),
         };
         if (archiveSlot !== null) {
@@ -1528,11 +1739,12 @@ function App() {
           setArchives(nextArchives);
           persistArchives(nextArchives);
         }
-        persistBrowserState(tags, annotations);
+        persistBrowserState(tags, annotations, filtersToSave);
         savedSnapshotRef.current = {
           data: cloneData(dataToSave),
           tags: cloneTags(tags),
           annotations: cloneAnnotations(annotations),
+          filters: filtersToSave,
         };
         setIsDirty(false);
         showNotice("已保存");
@@ -1553,6 +1765,7 @@ function App() {
       fileName,
       fileSizeBytes,
       filePath,
+      getCurrentFilters,
       isSaving,
       persistArchives,
       persistBrowserState,
@@ -1597,6 +1810,7 @@ function App() {
         data: saved.data,
         tags: saved.tags,
         annotations: saved.annotations,
+        filters: cloneFilters(saved.filters),
         updatedAt: Date.now(),
       };
       const nextArchives = archives.map((item, index) =>
@@ -1604,7 +1818,7 @@ function App() {
       );
       setArchives(nextArchives);
       persistArchives(nextArchives);
-      persistBrowserState(saved.tags, saved.annotations);
+      persistBrowserState(saved.tags, saved.annotations, saved.filters);
       if (isDesktop() && filePath) {
         try {
           await invoke("save_csv", {
@@ -1645,12 +1859,13 @@ function App() {
       data,
       tags,
       annotations,
+      filters: cloneFilters(getCurrentFilters()),
       updatedAt: Date.now(),
     };
     setArchives((previous) =>
       previous.map((item, index) => (index === archiveSlot ? snapshot : item)),
     );
-    persistBrowserState(tags, annotations);
+    persistBrowserState(tags, annotations, snapshot.filters);
   }, [
     annotations,
     archiveSlot,
@@ -1659,6 +1874,7 @@ function App() {
     fileName,
     fileSizeBytes,
     filePath,
+    getCurrentFilters,
     persistBrowserState,
     tags,
     workspaceLoaded,
@@ -1670,11 +1886,23 @@ function App() {
     setSelectedRange(null);
   }, []);
   const clearAllFilters = () => {
+    const current = getCurrentFilters();
+    const next = {
+      ...current,
+      columnFilters: {},
+      columnValueSelections: {},
+      columnValueFilterModes: {},
+      columnTagFilters: {},
+    };
     setGlobalValue("");
-    setColumnFilters({});
-    setColumnValueSelections({});
-    setColumnValueFilterModes({});
-    setColumnTagFilters({});
+    if (JSON.stringify(current) !== JSON.stringify(next)) {
+      rememberChange();
+      setColumnFilters(next.columnFilters);
+      setColumnValueSelections(next.columnValueSelections);
+      setColumnValueFilterModes(next.columnValueFilterModes);
+      setColumnTagFilters(next.columnTagFilters);
+      setIsDirty(true);
+    }
     setOpenColumnFilter(null);
   };
   const rangeBounds = selectedRange
@@ -2416,6 +2644,12 @@ function App() {
     setData(previous.data);
     setTags(previous.tags);
     setAnnotations(previous.annotations);
+    setHiddenColumns(new Set(previous.filters.hiddenColumns));
+    setColumnFilters(previous.filters.columnFilters);
+    setColumnValueSelections(previous.filters.columnValueSelections);
+    setColumnValueFilterModes(previous.filters.columnValueFilterModes);
+    setColumnTagFilters(previous.filters.columnTagFilters);
+    setOpenColumnFilter(null);
     setEditingCell(null);
     setIsDirty(true);
   };
@@ -2427,6 +2661,12 @@ function App() {
     setData(next.data);
     setTags(next.tags);
     setAnnotations(next.annotations);
+    setHiddenColumns(new Set(next.filters.hiddenColumns));
+    setColumnFilters(next.filters.columnFilters);
+    setColumnValueSelections(next.filters.columnValueSelections);
+    setColumnValueFilterModes(next.filters.columnValueFilterModes);
+    setColumnTagFilters(next.filters.columnTagFilters);
+    setOpenColumnFilter(null);
     setEditingCell(null);
     setIsDirty(true);
   };
@@ -2533,37 +2773,53 @@ function App() {
     };
   }, []);
 
-  const updateColumnValueFilter = (header: string, value: string) =>
+  const updateColumnValueFilter = (header: string, value: string) => {
+    if (columnFilters[header] === value) return;
+    rememberChange();
     setColumnFilters((previous) => ({ ...previous, [header]: value }));
-  const updateColumnTagFilter = (header: string, value: string) =>
+    setIsDirty(true);
+  };
+  const updateColumnTagFilter = (header: string, value: string) => {
+    if (columnTagFilters[header] === value) return;
+    rememberChange();
     setColumnTagFilters((previous) => ({ ...previous, [header]: value }));
+    setIsDirty(true);
+  };
   const setColumnValueMode = (
     header: string,
     mode: ColumnValueFilterMode,
-  ) =>
+  ) => {
+    if ((columnValueFilterModes[header] ?? "include") === mode) return;
+    rememberChange();
     setColumnValueFilterModes((previous) => ({ ...previous, [header]: mode }));
+    setIsDirty(true);
+  };
   const toggleColumnValue = (header: string, value: string) => {
     const allValues = columnUniqueValues[header] ?? [];
-    setColumnValueSelections((previous) => {
-      const hasSelection = Object.prototype.hasOwnProperty.call(previous, header);
-      const current = hasSelection
-        ? previous[header]
-        : columnValueFilterModes[header] === "exclude"
-          ? []
-          : allValues;
-      const nextValues = current.includes(value)
-        ? current.filter((item) => item !== value)
-        : [...current, value];
-      const next = { ...previous };
-      const mode = columnValueFilterModes[header] ?? "include";
-      const noFilter =
-        mode === "exclude"
-          ? nextValues.length === 0
-          : nextValues.length === allValues.length;
-      if (noFilter) delete next[header];
-      else next[header] = nextValues;
-      return next;
-    });
+    const hasSelection = Object.prototype.hasOwnProperty.call(
+      columnValueSelections,
+      header,
+    );
+    const current = hasSelection
+      ? columnValueSelections[header]
+      : columnValueFilterModes[header] === "exclude"
+        ? []
+        : allValues;
+    const nextValues = current.includes(value)
+      ? current.filter((item) => item !== value)
+      : [...current, value];
+    const next = { ...columnValueSelections };
+    const mode = columnValueFilterModes[header] ?? "include";
+    const noFilter =
+      mode === "exclude"
+        ? nextValues.length === 0
+        : nextValues.length === allValues.length;
+    if (noFilter) delete next[header];
+    else next[header] = nextValues;
+    if (JSON.stringify(next) === JSON.stringify(columnValueSelections)) return;
+    rememberChange();
+    setColumnValueSelections(next);
+    setIsDirty(true);
   };
   const updateVisibleColumnValues = (
     header: string,
@@ -2572,73 +2828,78 @@ function App() {
   ) => {
     if (!values.length) return;
     const allValues = columnUniqueValues[header] ?? [];
-    setColumnValueSelections((previous) => {
-      const hasSelection = Object.prototype.hasOwnProperty.call(previous, header);
-      const selected = new Set(
-        hasSelection
-          ? previous[header]
-          : columnValueFilterModes[header] === "exclude"
-            ? []
-            : allValues,
-      );
-      values.forEach((value) => {
-        if (mode === "select") selected.add(value);
-        else if (mode === "clear") selected.delete(value);
-        else if (selected.has(value)) selected.delete(value);
-        else selected.add(value);
-      });
-      const nextValues = allValues.filter((value) => selected.has(value));
-      const next = { ...previous };
-      const filterMode = columnValueFilterModes[header] ?? "include";
-      const noFilter =
-        filterMode === "exclude"
-          ? nextValues.length === 0
-          : nextValues.length === allValues.length;
-      if (noFilter) delete next[header];
-      else next[header] = nextValues;
-      return next;
+    const hasSelection = Object.prototype.hasOwnProperty.call(
+      columnValueSelections,
+      header,
+    );
+    const selected = new Set(
+      hasSelection
+        ? columnValueSelections[header]
+        : columnValueFilterModes[header] === "exclude"
+          ? []
+          : allValues,
+    );
+    values.forEach((value) => {
+      if (mode === "select") selected.add(value);
+      else if (mode === "clear") selected.delete(value);
+      else if (selected.has(value)) selected.delete(value);
+      else selected.add(value);
     });
+    const nextValues = allValues.filter((value) => selected.has(value));
+    const next = { ...columnValueSelections };
+    const filterMode = columnValueFilterModes[header] ?? "include";
+    const noFilter =
+      filterMode === "exclude"
+        ? nextValues.length === 0
+        : nextValues.length === allValues.length;
+    if (noFilter) delete next[header];
+    else next[header] = nextValues;
+    if (JSON.stringify(next) === JSON.stringify(columnValueSelections)) return;
+    rememberChange();
+    setColumnValueSelections(next);
+    setIsDirty(true);
   };
   const clearColumnFilters = (header: string) => {
-    setColumnFilters((previous) => {
-      const next = { ...previous };
-      delete next[header];
-      return next;
-    });
-    setColumnTagFilters((previous) => {
-      const next = { ...previous };
-      delete next[header];
-      return next;
-    });
-    setColumnValueSelections((previous) => {
-      const next = { ...previous };
-      delete next[header];
-      return next;
-    });
-    setColumnValueFilterModes((previous) => {
-      const next = { ...previous };
-      delete next[header];
-      return next;
-    });
+    const current = getCurrentFilters();
+    const next = cloneFilters(current);
+    delete next.columnFilters[header];
+    delete next.columnTagFilters[header];
+    delete next.columnValueSelections[header];
+    delete next.columnValueFilterModes[header];
+    if (JSON.stringify(current) === JSON.stringify(next)) return;
+    rememberChange();
+    setColumnFilters(next.columnFilters);
+    setColumnTagFilters(next.columnTagFilters);
+    setColumnValueSelections(next.columnValueSelections);
+    setColumnValueFilterModes(next.columnValueFilterModes);
+    setIsDirty(true);
   };
 
   const toggleColumnVisibility = (column: number) => {
-    setHiddenColumns((previous) => {
-      const next = new Set(previous);
-      if (next.has(column)) next.delete(column);
-      else next.add(column);
-      return next;
-    });
+    const next = new Set(hiddenColumns);
+    if (next.has(column)) next.delete(column);
+    else next.add(column);
+    rememberChange();
+    setHiddenColumns(next);
+    setIsDirty(true);
   };
   const invertColumnVisibility = () => {
     if (!data) return;
-    setHiddenColumns((previous) => {
-      const next = new Set<number>();
-      data.headers.forEach((_, column) => {
-        if (!previous.has(column)) next.add(column);
-      });
-      return next;
+    const next = new Set<number>();
+    data.headers.forEach((_, column) => {
+      if (!hiddenColumns.has(column)) next.add(column);
     });
+    if (next.size === hiddenColumns.size && [...next].every((column) => hiddenColumns.has(column)))
+      return;
+    rememberChange();
+    setHiddenColumns(next);
+    setIsDirty(true);
+  };
+  const showAllColumns = () => {
+    if (!hiddenColumns.size) return;
+    rememberChange();
+    setHiddenColumns(new Set());
+    setIsDirty(true);
   };
 
   const createTagsExport = () =>
@@ -2651,11 +2912,12 @@ function App() {
     );
     setArchiveSlot(null);
   };
-  const exportChoice = (choice: ExportOption) => {
-    if (choice === "both" && data && fileName) {
-      downloadBlob(
-        `${fileName}.zip`,
-        createArchiveBundle([
+  const exportChoice = async (choice: ExportOption) => {
+    if (!data || !fileName) return;
+    let exported = false;
+    try {
+      if (choice === "both") {
+        const blob = createArchiveBundle([
           {
             fileName,
             filePath,
@@ -2663,31 +2925,45 @@ function App() {
             data,
             tags,
             annotations,
+            filters: cloneFilters(getCurrentFilters()),
             updatedAt: Date.now(),
           },
-        ]),
-      );
-    } else if (choice === "csv")
-      downloadFile(
-        `${baseFileName}${delimiter === "\t" ? ".tsv" : ".csv"}`,
-        data ? serializeDelimited(data, delimiter) : "",
-        "text/plain;charset=utf-8",
-      );
-    else if (choice === "tags")
-      downloadFile(
-        `${baseFileName}.tags.json`,
-        createTagsExport(),
-        "application/json",
-      );
+        ]);
+        exported = await exportFile(
+          `${fileName}.zip`,
+          new Uint8Array(await blob.arrayBuffer()),
+          "application/zip",
+          "zip",
+        );
+      } else if (choice === "csv") {
+        const extension = delimiter === "\t" ? "tsv" : "csv";
+        exported = await exportFile(
+          `${baseFileName}.${extension}`,
+          serializeDelimited(data, delimiter),
+          "text/plain;charset=utf-8",
+          extension,
+        );
+      } else {
+        exported = await exportFile(
+          `${baseFileName}.tags.json`,
+          createTagsExport(),
+          "application/json",
+          "json",
+        );
+      }
+    } catch (error) {
+      showNotice(`导出失败：${String(error)}`);
+    }
     setShowExportMenu(false);
     if (
+      exported &&
       (choice === "csv" || choice === "both") &&
       archiveSlot !== null &&
       window.confirm("表格已导出，是否清理当前存档？")
     )
       cleanCurrentArchive();
   };
-  const exportArchiveChoice = (choice: ExportOption) => {
+  const exportArchiveChoice = async (choice: ExportOption) => {
     const selected = Array.from(selectedArchiveSlots)
       .sort((a, b) => a - b)
       .map((index) => archives[index])
@@ -2697,29 +2973,44 @@ function App() {
       setShowArchiveExportMenu(false);
       return;
     }
-    if (choice === "both")
-      downloadBlob(
-        `tagger-export-${selected.length}.zip`,
-        createArchiveBundle(selected),
-      );
-    else
-      selected.forEach((slot) => {
-        const base = slot.fileName.replace(/\.(csv|tsv)$/i, "");
-        if (choice === "csv")
-          downloadFile(
-            `${base}${slot.delimiter === "\t" ? ".tsv" : ".csv"}`,
-            serializeDelimited(slot.data, slot.delimiter),
-            "text/plain;charset=utf-8",
+    let exportedCount = 0;
+    try {
+      if (choice === "both") {
+        const exported = await exportFile(
+          `tagger-export-${selected.length}.zip`,
+          new Uint8Array(await createArchiveBundle(selected).arrayBuffer()),
+          "application/zip",
+          "zip",
+        );
+        exportedCount = exported ? selected.length : 0;
+      } else {
+        for (const slot of selected) {
+          const base = slot.fileName.replace(/\.(csv|tsv)$/i, "");
+          const extension = choice === "csv"
+            ? slot.delimiter === "\t" ? "tsv" : "csv"
+            : "json";
+          const exported = await exportFile(
+            choice === "csv" ? `${base}.${extension}` : `${base}.tags.json`,
+            choice === "csv"
+              ? serializeDelimited(slot.data, slot.delimiter)
+              : serializeTagsExport(
+                  slot.fileName,
+                  slot.delimiter,
+                  slot.tags,
+                  slot.annotations,
+                ),
+            choice === "csv" ? "text/plain;charset=utf-8" : "application/json",
+            extension,
           );
-        if (choice === "tags")
-          downloadFile(
-            `${base}.tags.json`,
-            serializeTagsExport(slot.fileName, slot.delimiter, slot.tags, slot.annotations),
-            "application/json",
-          );
-      });
+          if (!exported) break;
+          exportedCount += 1;
+        }
+      }
+    } catch (error) {
+      showNotice(`导出失败：${String(error)}`);
+    }
     setShowArchiveExportMenu(false);
-    showNotice(`已导出 ${selected.length} 个存档`);
+    if (exportedCount) showNotice(`已导出 ${exportedCount} 个存档`);
   };
   const downloadData = () => {
     if (!data) return;
@@ -3408,7 +3699,7 @@ function App() {
                           </button>
                           <button
                             className="value-filter-link"
-                            onClick={() => setHiddenColumns(new Set())}
+                            onClick={showAllColumns}
                           >
                             全部显示
                           </button>
@@ -3845,7 +4136,12 @@ function App() {
             className={`annotation-sidebar ${tagPanelDock === "floating" ? "is-floating" : ""}`}
             style={
               tagPanelDock === "floating"
-                ? { left: `${tagPanelPosition.left}px`, top: `${tagPanelPosition.top}px` }
+                ? {
+                    left: `${tagPanelPosition.left}px`,
+                    top: `${tagPanelPosition.top}px`,
+                    width: `${tagPanelSize.width}px`,
+                    height: `${tagPanelSize.height}px`,
+                  }
                 : undefined
             }
           >
