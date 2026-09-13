@@ -6,6 +6,9 @@ import React, {
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { basename } from "@tauri-apps/api/path";
+import { open as openNativeFileDialog } from "@tauri-apps/plugin-dialog";
+import { readFile, readTextFile, stat } from "@tauri-apps/plugin-fs";
 import type { Annotations, ParsedData, Tag } from "./types";
 import { parseDelimited, parseDelimitedFile as parseDelimitedFileOnMain } from "./csvParser";
 import "./App.css";
@@ -40,6 +43,8 @@ type WorkspaceState = Pick<WorkspaceSnapshot, "tags" | "annotations">;
 type ArchiveImportPair = {
   fileName: string;
   file?: File;
+  path?: string;
+  data?: ParsedData;
   content?: string;
   tagContent?: string;
   sizeBytes: number;
@@ -508,8 +513,7 @@ function tagBaseName(name: string) {
     .toLowerCase();
 }
 
-async function readStoredZip(file: File) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
+function readStoredZipBytes(bytes: Uint8Array) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const decoder = new TextDecoder();
   const entries: Array<{ name: string; content: string }> = [];
@@ -538,6 +542,10 @@ async function readStoredZip(file: File) {
   }
   if (!entries.length) throw new Error("ZIP 中没有可导入的表格");
   return entries;
+}
+
+async function readStoredZip(file: File) {
+  return readStoredZipBytes(new Uint8Array(await file.arrayBuffer()));
 }
 
 function toggleTag(list: string[], name: string, remove: boolean) {
@@ -654,6 +662,7 @@ function App() {
     useState<Annotations>(makeEmptyAnnotations);
   const [archives, setArchives] =
     useState<Array<ArchiveSlot | null>>(initialArchives);
+  const [archivesReady, setArchivesReady] = useState(false);
   const [archiveScreen, setArchiveScreen] = useState(false);
   const [archiveImportMode, setArchiveImportMode] =
     useState<ArchiveImportMode>("new");
@@ -847,18 +856,23 @@ function App() {
   };
 
   useEffect(() => {
-    persistArchives(archives);
-  }, [archives, persistArchives]);
-  useEffect(() => {
-    if (localStorage.getItem(ARCHIVE_IDB_MARKER) !== "1") return;
+    if (localStorage.getItem(ARCHIVE_IDB_MARKER) !== "1") {
+      setArchivesReady(true);
+      return;
+    }
     let active = true;
     void readIndexedArchives().then((saved) => {
-      if (active && saved) setArchives(saved);
+      if (!active) return;
+      if (saved) setArchives(saved);
+      setArchivesReady(true);
     });
     return () => {
       active = false;
     };
   }, []);
+  useEffect(() => {
+    if (archivesReady) persistArchives(archives);
+  }, [archives, archivesReady, persistArchives]);
   useEffect(() => {
     localStorage.setItem("tagger-theme", theme);
   }, [theme]);
@@ -1046,9 +1060,36 @@ function App() {
     });
   };
 
+  const readDesktopTablePair = async (
+    path: string,
+    tagPath?: string,
+  ): Promise<ArchiveImportPair> => {
+    const parsed = await invoke<{
+      headers: string[];
+      rows: string[][];
+      row_count: number;
+      column_count: number;
+    }>("open_csv", { path });
+    const fileInfo = await stat(path).catch(() => null);
+    const fileName = await basename(path);
+    return {
+      fileName,
+      path,
+      data: {
+        headers: parsed.headers,
+        rows: parsed.rows,
+        rowCount: parsed.row_count,
+        columnCount: parsed.column_count,
+      },
+      tagContent: tagPath ? await readTextFile(tagPath) : undefined,
+      sizeBytes: fileInfo?.size ?? 0,
+    };
+  };
+
   const importArchivePairs = async (
     pairs: ArchiveImportPair[],
     skippedCount = 0,
+    targetSlot: number | null = null,
   ) => {
     if (!pairs.length) {
       showNotice(
@@ -1060,7 +1101,7 @@ function App() {
       return;
     }
     const nextArchives = [...archives];
-    let cursor = pendingSlot ?? 0;
+    let cursor = targetSlot ?? pendingSlot ?? 0;
     let imported = 0;
     let restored = 0;
     setImportProgress(0);
@@ -1072,24 +1113,25 @@ function App() {
           ? "\t"
           : ",";
         try {
-          const source =
-            pair.file ??
-            new File([pair.content ?? ""], pair.fileName, {
-              type: "text/plain",
-            });
           const importedTags = pair.tagContent
             ? parseTagExportContent(pair.tagContent)
             : null;
-          nextArchives[cursor] = {
-            fileName: pair.fileName,
-            filePath: null,
-            delimiter: nextDelimiter,
-            sizeBytes: pair.sizeBytes,
-            data: await parseDelimitedFile(
-              source,
+          const importedData =
+            pair.data ??
+            (await parseDelimitedFile(
+              pair.file ??
+                new File([pair.content ?? ""], pair.fileName, {
+                  type: "text/plain",
+                }),
               nextDelimiter,
               setImportProgress,
-            ),
+            ));
+          nextArchives[cursor] = {
+            fileName: pair.fileName,
+            filePath: pair.path ?? null,
+            delimiter: nextDelimiter,
+            sizeBytes: pair.sizeBytes,
+            data: importedData,
             tags: importedTags?.tags ?? {},
             annotations: importedTags?.annotations ?? makeEmptyAnnotations(),
             updatedAt: Date.now(),
@@ -1116,6 +1158,79 @@ function App() {
       }
     } finally {
       setImportProgress(null);
+      setPendingSlot(null);
+    }
+  };
+
+  const importDesktopPaths = async (
+    mode: ArchiveImportMode,
+    targetSlot: number | null = null,
+  ) => {
+    const selected = await openNativeFileDialog({
+      title: mode === "restore" ? "恢复 CSV 与标签" : "导入 CSV / TSV",
+      multiple: true,
+      filters: [
+        {
+          name: "Tagger 文件",
+          extensions: ["csv", "tsv", "json", "zip"],
+        },
+      ],
+    });
+    if (!selected) {
+      setPendingSlot(null);
+      return;
+    }
+    const paths = Array.isArray(selected) ? selected : [selected];
+    try {
+      if (mode === "new") {
+        const tablePaths = paths.filter(isTableFileName);
+        await importArchivePairs(
+          await Promise.all(tablePaths.map((path) => readDesktopTablePair(path))),
+          0,
+          targetSlot,
+        );
+        return;
+      }
+
+      const pairs: ArchiveImportPair[] = [];
+      const zipPaths = paths.filter((path) => /\.zip$/i.test(path));
+      for (const zipPath of zipPaths) {
+        const entries = readStoredZipBytes(await readFile(zipPath));
+        const fileInfo = await stat(zipPath).catch(() => null);
+        entries
+          .filter((entry) => isTableFileName(entry.name))
+          .forEach((entry) => {
+            const tagEntry = entries.find(
+              (candidate) =>
+                isTagFileName(candidate.name) &&
+                tagBaseName(candidate.name) === tableBaseName(entry.name),
+            );
+            pairs.push({
+              fileName: entry.name.split(/[\\/]/).pop() || entry.name,
+              content: entry.content,
+              tagContent: tagEntry?.content,
+              sizeBytes: fileInfo?.size ?? 0,
+            });
+          });
+      }
+
+      const tablePaths = paths.filter(isTableFileName);
+      const tagPaths = paths.filter(
+        (path) => isTagFileName(path) && !isTableFileName(path),
+      );
+      for (const tablePath of tablePaths) {
+        const exactTag = tagPaths.find(
+          (tagPath) => tagBaseName(tagPath) === tableBaseName(tablePath),
+        );
+        const fallbackTag =
+          tablePaths.length === 1 && tagPaths.length === 1 ? tagPaths[0] : undefined;
+        pairs.push(
+          await readDesktopTablePair(tablePath, exactTag ?? fallbackTag),
+        );
+      }
+      await importArchivePairs(pairs, 0, targetSlot);
+    } catch (error) {
+      showNotice(`文件读取失败：${String(error)}`);
       setPendingSlot(null);
     }
   };
@@ -1225,6 +1340,10 @@ function App() {
 
   const openArchiveImport = (mode: ArchiveImportMode) => {
     setArchiveImportMode(mode);
+    if (isDesktop()) {
+      void importDesktopPaths(mode);
+      return;
+    }
     archiveInputRef.current?.click();
   };
 
@@ -1312,7 +1431,8 @@ function App() {
       return;
     }
     setPendingSlot(slot);
-    fileInputRef.current?.click();
+    if (isDesktop()) void importDesktopPaths("new", slot);
+    else fileInputRef.current?.click();
   };
 
   const requestDeleteArchive = (slot: number) => {
@@ -2534,7 +2654,7 @@ function App() {
   const exportChoice = (choice: ExportOption) => {
     if (choice === "both" && data && fileName) {
       downloadBlob(
-        `${baseFileName}.tagger.zip`,
+        `${fileName}.zip`,
         createArchiveBundle([
           {
             fileName,
@@ -2964,6 +3084,15 @@ function App() {
                   <section>
                     <h3>导入</h3>
                     <p>浏览器支持小于 3 MB 的文件；大文件请使用安装版。</p>
+                    <p>存档页的“导入 ZIP”用于同时恢复表格和标签，也可选择单个 CSV/TSV 与标签 JSON。</p>
+                    <p>本地开发：浏览器执行 <code>npm run dev</code>；桌面执行 <code>npm run tauri dev</code>。</p>
+                  </section>
+                  <section>
+                    <h3>存档与保存</h3>
+                    <p>每个文件占一个存档位；编辑中的内容会同步到当前存档，<kbd>⌘/Ctrl+S</kbd> 可立即保存。</p>
+                    <p><b>浏览器</b> 使用当前网站的浏览器存储（localStorage / IndexedDB）。刷新通常会保留；清除网站数据、无痕窗口关闭、换浏览器或换设备可能丢失，请导出 ZIP 备份。</p>
+                    <p><b>桌面</b> 点击导入选择原文件后，保存会写回原 CSV/TSV，并在同目录生成 <code>文件名.tags.json</code>。存档槽仍保存在应用本地数据中；清除应用数据会清空存档槽，但不会替你删除原文件。</p>
+                    <p>桌面拖入文件或从 ZIP 恢复的是存档副本，需通过导出得到文件；要保存回原 CSV，请使用导入按钮选择它。</p>
                   </section>
                   <section>
                     <h3>模式</h3>
@@ -3120,12 +3249,12 @@ function App() {
                   type="button"
                   className="archive-import-action primary"
                   onClick={() => openArchiveImport("restore")}
-                  title="导入 .tagger.zip（包含 CSV/TSV 和标签 JSON）"
+                  title="导入 ZIP（包含 CSV/TSV 和标签 JSON）"
                 >
-                  恢复 CSV + 标签
+                  导入 ZIP
                 </button>
                 <small className="archive-import-hint">
-                  导入 .tagger.zip（含 CSV + 标签 JSON）
+                  ZIP 内含 CSV + 标签 JSON
                 </small>
               </div>
             )}

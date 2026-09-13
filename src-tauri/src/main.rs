@@ -105,7 +105,11 @@ fn open_csv(path: String) -> Result<ParsedData, String> {
     let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     let reader = std::io::BufReader::new(file);
 
-    let delimiter = if path.ends_with(".tsv") { b'\t' } else { b',' };
+    let delimiter = if path.to_lowercase().ends_with(".tsv") {
+        b'\t'
+    } else {
+        b','
+    };
 
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(delimiter)

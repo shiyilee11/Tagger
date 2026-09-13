@@ -3058,12 +3058,10 @@ dependencies = [
  "csv",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
- "thiserror 1.0.69",
 ]
 
 [[package]]
