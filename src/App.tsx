@@ -65,26 +65,6 @@ const TAG_COLORS = [
   "#dc4c84",
   "#66717a",
 ];
-const DEFAULT_TAGS: Tag[] = [
-  {
-    name: "keep",
-    definition: "保留：满足当前筛选或研究条件的数据。",
-    color: "#2457ff",
-    shortcut: "1",
-  },
-  {
-    name: "review",
-    definition: "复核：需要人工再次确认的数据。",
-    color: "#e2a227",
-    shortcut: "2",
-  },
-  {
-    name: "exclude",
-    definition: "排除：不进入后续分析或训练集的数据。",
-    color: "#ef765b",
-    shortcut: "3",
-  },
-];
 const EMPTY_ANNOTATIONS: Annotations = {
   rows: {},
   cells: {},
@@ -1292,46 +1272,6 @@ function App() {
     }
     setPendingSlot(null);
     event.target.value = "";
-  };
-
-  const loadExample = async () => {
-    const example: ParsedData = {
-      headers: ["record_id", "topic", "confidence", "note"],
-      rows: [
-        ["R-001", "Apple silicon", "0.96", "Verified in the primary source"],
-        ["R-002", "On-device inference", "0.84", "Needs a second source"],
-        ["R-003", "Synthetic benchmark", "0.63", "Scope is not yet clear"],
-        ["R-004", "Edge deployment", "0.91", "Useful for the next experiment"],
-        ["R-005", "Data licensing", "0.42", "Probably out of scope"],
-        ["R-006", "Model distillation", "0.78", "Keep for literature review"],
-      ],
-      rowCount: 6,
-      columnCount: 4,
-    };
-    await openData(example, "example.csv", null, ",", null);
-    const exampleTags = Object.fromEntries(
-      DEFAULT_TAGS.map((tag) => [tag.name, tag]),
-    );
-    const exampleAnnotations: Annotations = {
-      rows: {
-        "row-0": ["keep"],
-        "row-1": ["review"],
-        "row-3": ["keep"],
-        "row-4": ["exclude"],
-        "row-5": ["review"],
-      },
-      cells: { "row-2": { confidence: ["review"] } },
-      columns: { confidence: ["review"] },
-      dataset: [],
-    };
-    setTags(exampleTags);
-    setAnnotations(exampleAnnotations);
-    savedSnapshotRef.current = {
-      data: cloneData(example),
-      tags: cloneTags(exampleTags),
-      annotations: cloneAnnotations(exampleAnnotations),
-    };
-    setIsDirty(false);
   };
 
   const openArchive = (slot: number) => {
@@ -3256,12 +3196,6 @@ function App() {
             <div className="empty-actions">
               <button className="primary-button" onClick={handleOpen}>
                 导入 CSV / TSV
-              </button>
-              <button
-                className="secondary-button"
-                onClick={() => void loadExample()}
-              >
-                打开 Demo
               </button>
             </div>
           </div>

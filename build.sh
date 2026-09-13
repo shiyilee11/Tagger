@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 echo "Building Tagger - CSV/TSV Tagger"
 echo "================================"
@@ -25,7 +26,7 @@ if ! command -v npm &> /dev/null; then
 fi
 
 echo "Installing dependencies..."
-npm install
+npm ci
 
 echo "Building frontend..."
 npm run build

@@ -55,13 +55,34 @@ pub struct ParsedData {
 // ──────────────────────────────────────────────
 
 fn tags_path(csv_path: &str) -> String {
-    format!("{}.tags.json", csv_path)
+    let path = Path::new(csv_path);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(csv_path);
+    let file_name = format!("{stem}.tags.json");
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join(&file_name).to_string_lossy().into_owned())
+        .unwrap_or(file_name)
+}
+
+fn legacy_tags_path(csv_path: &str) -> String {
+    format!("{csv_path}.tags.json")
 }
 
 fn load_tags(csv_path: &str) -> TagsFile {
     let path = tags_path(csv_path);
-    if Path::new(&path).exists() {
-        std::fs::read_to_string(&path)
+    let legacy_path = legacy_tags_path(csv_path);
+    let source_path = if Path::new(&path).exists() {
+        path
+    } else if legacy_path != path && Path::new(&legacy_path).exists() {
+        legacy_path
+    } else {
+        path
+    };
+    if Path::new(&source_path).exists() {
+        std::fs::read_to_string(&source_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default()

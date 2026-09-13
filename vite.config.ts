@@ -8,8 +8,8 @@ export default defineConfig({
     sourcemap: true,
   },
   server: {
-    // Vite 开发服务器端口，需要和 tauri.conf.json 的 devUrl 一致
+    // Tauri devUrl 必须始终指向当前项目，禁止自动切换到其他服务。
     port: 5173,
-    strictPort: false,
+    strictPort: true,
   },
 });
