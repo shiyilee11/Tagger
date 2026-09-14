@@ -164,7 +164,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .data-table th, .data-table td { min-width: 0; }
 .data-table th { overflow: visible; text-overflow: clip; }
 .data-table th > span:first-child { display: inline-block; max-width: calc(100% - 29px); overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
-.data-table td { height: var(--table-row-height, 38px); padding: 0 9px; border-bottom: 1px solid var(--line-soft); color: var(--text); vertical-align: middle; white-space: nowrap; }
+.data-table td { height: var(--row-height, var(--table-row-height, 38px)); padding: 0 9px; border-bottom: 1px solid var(--line-soft); color: var(--text); vertical-align: middle; white-space: nowrap; }
 .data-table tbody tr:hover { background: #fafafa; }
 .data-table tbody tr.row-selected { background: #edf3ff; }
 .data-table .row-index-head, .data-table .row-index { width: 52px; padding-left: 16px; color: #8c8c92; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }

@@ -16,7 +16,7 @@ import {
   readTextFile,
   stat,
 } from "@tauri-apps/plugin-fs";
-import type { Annotations, ParsedData, Tag } from "./types";
+import type { Annotations, ParsedData, Tag, WorkspaceLayout } from "./types";
 import { parseDelimited, parseDelimitedFile as parseDelimitedFileOnMain } from "./csvParser";
 import "./App.css";
 
@@ -47,6 +47,7 @@ type ArchiveSlot = {
   data: ParsedData;
   tags: Record<string, Tag>;
   annotations: Annotations;
+  layout: WorkspaceLayout;
   filters: WorkspaceFilters;
   updatedAt: number;
 };
@@ -54,9 +55,10 @@ type WorkspaceSnapshot = {
   data: ParsedData;
   tags: Record<string, Tag>;
   annotations: Annotations;
+  layout: WorkspaceLayout;
   filters: WorkspaceFilters;
 };
-type WorkspaceState = Pick<WorkspaceSnapshot, "tags" | "annotations" | "filters">;
+type WorkspaceState = Pick<WorkspaceSnapshot, "tags" | "annotations" | "layout" | "filters">;
 type ArchiveImportPair = {
   fileName: string;
   file?: File;
@@ -69,7 +71,9 @@ type ArchiveImportPair = {
 type ParsedTagImport = {
   tags: Record<string, Tag>;
   annotations: Annotations;
+  layout: WorkspaceLayout;
   hasAnnotations: boolean;
+  hasLayout: boolean;
 };
 type ArchiveImportMode = "new" | "restore";
 type EditorMode = "tagger" | "edit";
@@ -103,6 +107,7 @@ const DEFAULT_TABLE_ROW_HEIGHT = 38;
 const MIN_TABLE_ROW_HEIGHT = 24;
 const MAX_TABLE_ROW_HEIGHT = 120;
 const DEFAULT_TABLE_FONT_SIZE = 13;
+const DEFAULT_COLUMN_HEADER_FONT_SIZE = 11;
 const MIN_TABLE_FONT_SIZE = 8;
 const MAX_TABLE_FONT_SIZE = 32;
 const TABLE_OVERSCAN = 8;
@@ -133,16 +138,6 @@ const TAG_TEMPLATE = `{
 
 const isDesktop = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-function readNumericPreference(
-  key: string,
-  fallback: number,
-  min: number,
-  max: number,
-) {
-  if (typeof window === "undefined") return fallback;
-  const value = Number(localStorage.getItem(key));
-  return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
-}
 const makeEmptyAnnotations = (): Annotations => ({
   rows: {},
   cells: {},
@@ -156,6 +151,91 @@ const makeEmptyFilters = (): WorkspaceFilters => ({
   columnValueFilterModes: {},
   columnTagFilters: {},
 });
+const makeEmptyLayout = (): WorkspaceLayout => ({
+  baseRowHeight: DEFAULT_TABLE_ROW_HEIGHT,
+  baseFontSize: DEFAULT_TABLE_FONT_SIZE,
+  baseColumnHeaderFontSize: DEFAULT_COLUMN_HEADER_FONT_SIZE,
+  rowHeights: {},
+  rowFontSizes: {},
+  columnFontSizes: {},
+  cellFontSizes: {},
+  columnHeaderFontSizes: {},
+});
+
+function normalizeLayout(value: unknown): WorkspaceLayout {
+  if (!value || typeof value !== "object") return makeEmptyLayout();
+  const source = value as Record<string, unknown>;
+  const numberMap = (item: unknown, min: number, max: number) => {
+    if (!item || typeof item !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(item as Record<string, unknown>).flatMap(([key, entry]) => {
+        const number = Number(entry);
+        return Number.isFinite(number)
+          ? [[key, Math.min(max, Math.max(min, number))]]
+          : [];
+      }),
+    );
+  };
+  const baseRowHeight = Number(source.baseRowHeight);
+  const baseFontSize = Number(source.baseFontSize);
+  const baseColumnHeaderFontSize = Number(source.baseColumnHeaderFontSize);
+  return {
+    baseRowHeight: Number.isFinite(baseRowHeight)
+      ? Math.min(
+          MAX_TABLE_ROW_HEIGHT,
+          Math.max(MIN_TABLE_ROW_HEIGHT, baseRowHeight),
+        )
+      : DEFAULT_TABLE_ROW_HEIGHT,
+    baseFontSize: Number.isFinite(baseFontSize)
+      ? Math.min(MAX_TABLE_FONT_SIZE, Math.max(MIN_TABLE_FONT_SIZE, baseFontSize))
+      : DEFAULT_TABLE_FONT_SIZE,
+    baseColumnHeaderFontSize: Number.isFinite(baseColumnHeaderFontSize)
+      ? Math.min(
+          MAX_TABLE_FONT_SIZE,
+          Math.max(MIN_TABLE_FONT_SIZE, baseColumnHeaderFontSize),
+        )
+      : DEFAULT_COLUMN_HEADER_FONT_SIZE,
+    rowHeights: numberMap(
+      source.rowHeights,
+      MIN_TABLE_ROW_HEIGHT,
+      MAX_TABLE_ROW_HEIGHT,
+    ),
+    rowFontSizes: numberMap(
+      source.rowFontSizes,
+      MIN_TABLE_FONT_SIZE,
+      MAX_TABLE_FONT_SIZE,
+    ),
+    columnFontSizes: numberMap(
+      source.columnFontSizes,
+      MIN_TABLE_FONT_SIZE,
+      MAX_TABLE_FONT_SIZE,
+    ),
+    cellFontSizes: numberMap(
+      source.cellFontSizes,
+      MIN_TABLE_FONT_SIZE,
+      MAX_TABLE_FONT_SIZE,
+    ),
+    columnHeaderFontSizes: numberMap(
+      source.columnHeaderFontSizes,
+      MIN_TABLE_FONT_SIZE,
+      MAX_TABLE_FONT_SIZE,
+    ),
+  };
+}
+
+function cloneLayout(source: WorkspaceLayout): WorkspaceLayout {
+  const normalized = normalizeLayout(source);
+  return {
+    baseRowHeight: normalized.baseRowHeight,
+    baseFontSize: normalized.baseFontSize,
+    baseColumnHeaderFontSize: normalized.baseColumnHeaderFontSize,
+    rowHeights: { ...normalized.rowHeights },
+    rowFontSizes: { ...normalized.rowFontSizes },
+    columnFontSizes: { ...normalized.columnFontSizes },
+    cellFontSizes: { ...normalized.cellFontSizes },
+    columnHeaderFontSizes: { ...normalized.columnHeaderFontSizes },
+  };
+}
 
 function normalizeFilters(value: unknown): WorkspaceFilters {
   if (!value || typeof value !== "object") return makeEmptyFilters();
@@ -387,6 +467,7 @@ function serializeTagsExport(
   delimiter: string,
   tags: Record<string, Tag>,
   annotations: Annotations,
+  layout: WorkspaceLayout = makeEmptyLayout(),
 ) {
   return JSON.stringify(
     {
@@ -398,6 +479,7 @@ function serializeTagsExport(
       },
       tags,
       annotations,
+      layout: cloneLayout(layout),
     },
     null,
     2,
@@ -499,6 +581,7 @@ function createArchiveBundle(slots: ArchiveSlot[]) {
           slot.delimiter,
           slot.tags,
           slot.annotations,
+          slot.layout,
         ),
       },
       {
@@ -610,12 +693,15 @@ function parseTagExportContent(content: string): ParsedTagImport {
   if (!Object.keys(imported).length) throw new Error("没有找到标签");
   const hasAnnotations =
     !!parsed.annotations && typeof parsed.annotations === "object";
+  const hasLayout = !!parsed.layout && typeof parsed.layout === "object";
   return {
     tags: imported,
     annotations: hasAnnotations
       ? normalizeAnnotations(parsed.annotations)
       : makeEmptyAnnotations(),
+    layout: normalizeLayout(parsed.layout),
     hasAnnotations,
+    hasLayout,
   };
 }
 
@@ -821,22 +907,7 @@ function App() {
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set());
   const [showColumnVisibility, setShowColumnVisibility] = useState(false);
   const [showTableSettings, setShowTableSettings] = useState(false);
-  const [tableRowHeight, setTableRowHeight] = useState(() =>
-    readNumericPreference(
-      "tagger-table-row-height",
-      DEFAULT_TABLE_ROW_HEIGHT,
-      MIN_TABLE_ROW_HEIGHT,
-      MAX_TABLE_ROW_HEIGHT,
-    ),
-  );
-  const [tableFontSize, setTableFontSize] = useState(() =>
-    readNumericPreference(
-      "tagger-table-font-size",
-      DEFAULT_TABLE_FONT_SIZE,
-      MIN_TABLE_FONT_SIZE,
-      MAX_TABLE_FONT_SIZE,
-    ),
-  );
+  const [layout, setLayout] = useState<WorkspaceLayout>(makeEmptyLayout);
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>(
     {},
   );
@@ -918,6 +989,7 @@ function App() {
   );
   const draggingRef = useRef(false);
   const rowResizingRef = useRef<{
+    row: number;
     startY: number;
     startHeight: number;
     pointerId: number;
@@ -978,6 +1050,7 @@ function App() {
       nextTags: Record<string, Tag>,
       nextAnnotations: Annotations,
       nextFilters: WorkspaceFilters = getCurrentFilters(),
+      nextLayout: WorkspaceLayout = layout,
     ) => {
       if (storageKey)
         localStorage.setItem(
@@ -986,6 +1059,7 @@ function App() {
             tags: nextTags,
             annotations: nextAnnotations,
             filters: cloneFilters(nextFilters),
+            layout: cloneLayout(nextLayout),
           }),
         );
     },
@@ -996,6 +1070,7 @@ function App() {
       columnValueSelections,
       getCurrentFilters,
       hiddenColumns,
+      layout,
       storageKey,
     ],
   );
@@ -1036,6 +1111,7 @@ function App() {
       nextTags: Record<string, Tag>,
       nextAnnotations: Annotations,
       failureMessage: string,
+      nextLayout: WorkspaceLayout = layout,
     ) => {
       if (!isDesktop() || !filePath) return;
       try {
@@ -1044,13 +1120,14 @@ function App() {
             csvPath: filePath,
             tags: nextTags,
             annotations: nextAnnotations,
+            layout: cloneLayout(nextLayout),
           }),
         );
       } catch (error) {
         showNotice(`${failureMessage}：${String(error)}`);
       }
     },
-    [enqueueDesktopWrite, filePath, showNotice],
+    [enqueueDesktopWrite, filePath, layout, showNotice],
   );
   const deleteDesktopTag = useCallback(
     async (name: string) => {
@@ -1136,12 +1213,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem(MARK_STYLE_KEY, markStyle);
   }, [markStyle]);
-  useEffect(() => {
-    localStorage.setItem("tagger-table-row-height", String(tableRowHeight));
-  }, [tableRowHeight]);
-  useEffect(() => {
-    localStorage.setItem("tagger-table-font-size", String(tableFontSize));
-  }, [tableFontSize]);
 
   useEffect(() => {
     const mouseMove = (event: MouseEvent) => {
@@ -1253,14 +1324,19 @@ function App() {
         const loadedAnnotations: Annotations = await invoke("get_annotations", {
           csvPath: path,
         });
+        const loadedLayout: WorkspaceLayout = normalizeLayout(
+          await invoke("get_layout", { csvPath: path }),
+        );
         const nextTags = Object.fromEntries(
           loadedTags.map((tag) => [tag.name, tag]),
         );
         setTags(nextTags);
         setAnnotations(loadedAnnotations);
+        setLayout(loadedLayout);
         return {
           tags: nextTags,
           annotations: loadedAnnotations,
+          layout: loadedLayout,
           filters: makeEmptyFilters(),
         };
       }
@@ -1270,12 +1346,15 @@ function App() {
           const parsed = JSON.parse(saved);
           const nextTags = parsed.tags ?? {};
           const nextAnnotations = parsed.annotations ?? makeEmptyAnnotations();
+          const nextLayout = normalizeLayout(parsed.layout);
           const nextFilters = normalizeFilters(parsed.filters);
           setTags(nextTags);
           setAnnotations(nextAnnotations);
+          setLayout(nextLayout);
           return {
             tags: nextTags,
             annotations: nextAnnotations,
+            layout: nextLayout,
             filters: nextFilters,
           };
         } catch {
@@ -1284,9 +1363,16 @@ function App() {
       }
       const nextTags = {};
       const nextAnnotations = makeEmptyAnnotations();
+      const nextLayout = makeEmptyLayout();
       setTags(nextTags);
       setAnnotations(nextAnnotations);
-      return { tags: nextTags, annotations: nextAnnotations, filters: makeEmptyFilters() };
+      setLayout(nextLayout);
+      return {
+        tags: nextTags,
+        annotations: nextAnnotations,
+        layout: nextLayout,
+        filters: makeEmptyFilters(),
+      };
     },
     [],
   );
@@ -1328,6 +1414,7 @@ function App() {
       setColumnTagFilters({});
       setOpenColumnFilter(null);
       setColumnWidths({});
+      setLayout(makeEmptyLayout());
       const loadedState = await loadWorkspaceState(name, path);
       const loadedFilters = cloneFilters(loadedState.filters);
       setHiddenColumns(new Set(loadedFilters.hiddenColumns));
@@ -1335,10 +1422,12 @@ function App() {
       setColumnValueSelections(loadedFilters.columnValueSelections);
       setColumnValueFilterModes(loadedFilters.columnValueFilterModes);
       setColumnTagFilters(loadedFilters.columnTagFilters);
+      setLayout(cloneLayout(loadedState.layout));
       savedSnapshotRef.current = {
         data: cloneData(nextData),
         tags: cloneTags(loadedState.tags),
         annotations: cloneAnnotations(loadedState.annotations),
+        layout: cloneLayout(loadedState.layout),
         filters: loadedFilters,
       };
       setWorkspaceLoaded(true);
@@ -1437,6 +1526,7 @@ function App() {
             data: importedData,
             tags: importedTags?.tags ?? {},
             annotations: importedTags?.annotations ?? makeEmptyAnnotations(),
+            layout: importedTags?.layout ?? makeEmptyLayout(),
             filters: makeEmptyFilters(),
             updatedAt: Date.now(),
           };
@@ -1712,6 +1802,7 @@ function App() {
       setFileSizeBytes(saved.sizeBytes ?? 0);
       setTags(saved.tags);
       setAnnotations(saved.annotations);
+      setLayout(cloneLayout(saved.layout));
       setEditorMode("tagger");
       setCapturingShortcut(null);
       setGlobalValue("");
@@ -1730,6 +1821,7 @@ function App() {
         data: cloneData(saved.data),
         tags: cloneTags(saved.tags),
         annotations: cloneAnnotations(saved.annotations),
+        layout: cloneLayout(saved.layout),
         filters: savedFilters,
       };
       setArchiveSlot(slot);
@@ -1773,6 +1865,7 @@ function App() {
           data,
           tags: cloneTags(tags),
           annotations: cloneAnnotations(annotations),
+          layout: cloneLayout(layout),
           filters: cloneFilters(getCurrentFilters()),
         }
       : null;
@@ -1809,6 +1902,7 @@ function App() {
       const revisionAtStart = workspaceRevisionRef.current;
       const tagsToSave = cloneTags(tags);
       const annotationsToSave = cloneAnnotations(annotations);
+      const layoutToSave = cloneLayout(layout);
       setIsSaving(true);
       isSavingRef.current = true;
       try {
@@ -1842,6 +1936,7 @@ function App() {
               csvPath: targetPath,
               tags: tagsToSave,
               annotations: annotationsToSave,
+              layout: layoutToSave,
             });
           });
         }
@@ -1857,6 +1952,7 @@ function App() {
             data: dataToSave,
             tags: tagsToSave,
             annotations: annotationsToSave,
+            layout: layoutToSave,
             filters: filtersToSave,
             updatedAt: Date.now(),
           };
@@ -1872,6 +1968,7 @@ function App() {
             data: cloneData(dataToSave),
             tags: tagsToSave,
             annotations: annotationsToSave,
+            layout: layoutToSave,
             filters: filtersToSave,
           };
           setIsDirty(false);
@@ -1903,6 +2000,7 @@ function App() {
       filePath,
       getCurrentFilters,
       enqueueDesktopWrite,
+      layout,
       persistArchives,
       persistBrowserState,
       showNotice,
@@ -1916,6 +2014,7 @@ function App() {
     const dataToSave = data;
     const tagsToSave = cloneTags(tags);
     const annotationsToSave = cloneAnnotations(annotations);
+    const layoutToSave = cloneLayout(layout);
     const extension = delimiter === "\t" ? "tsv" : "csv";
     let target: string | null;
     try {
@@ -1951,6 +2050,7 @@ function App() {
           csvPath: target,
           tags: tagsToSave,
           annotations: annotationsToSave,
+          layout: layoutToSave,
         });
       });
 
@@ -1966,6 +2066,7 @@ function App() {
           data: dataToSave,
           tags: tagsToSave,
           annotations: annotationsToSave,
+          layout: layoutToSave,
           filters: filtersToSave,
           updatedAt: Date.now(),
         };
@@ -1981,6 +2082,7 @@ function App() {
           data: cloneData(dataToSave),
           tags: tagsToSave,
           annotations: annotationsToSave,
+          layout: layoutToSave,
           filters: filtersToSave,
         };
         setIsDirty(false);
@@ -2034,6 +2136,7 @@ function App() {
         data: saved.data,
         tags: saved.tags,
         annotations: saved.annotations,
+        layout: cloneLayout(saved.layout),
         filters: cloneFilters(saved.filters),
         updatedAt: Date.now(),
       };
@@ -2056,6 +2159,7 @@ function App() {
               csvPath: filePath,
               tags: saved.tags,
               annotations: saved.annotations,
+              layout: cloneLayout(saved.layout),
             });
           });
         } catch (error) {
@@ -2085,6 +2189,7 @@ function App() {
       data,
       tags,
       annotations,
+      layout: cloneLayout(layout),
       filters: cloneFilters(getCurrentFilters()),
       updatedAt: Date.now(),
     };
@@ -2101,6 +2206,7 @@ function App() {
     fileSizeBytes,
     filePath,
     getCurrentFilters,
+    layout,
     persistBrowserState,
     tags,
     workspaceLoaded,
@@ -2143,6 +2249,155 @@ function App() {
     ? (rangeBounds.bottom - rangeBounds.top + 1) *
       (rangeBounds.right - rangeBounds.left + 1)
     : 0;
+  const hasCellSelection =
+    !!rangeBounds || selectedRows.size > 0 || selectedColumns.size > 0;
+  const selectionIsWholeTable =
+    !!data &&
+    !!rangeBounds &&
+    rangeBounds.top === 0 &&
+    rangeBounds.left === 0 &&
+    rangeBounds.bottom === data.rows.length - 1 &&
+    rangeBounds.right === data.headers.length - 1;
+  const selectedRowsForFormatting = () => {
+    if (!data) return [];
+    if (rangeBounds)
+      return Array.from(
+        { length: rangeBounds.bottom - rangeBounds.top + 1 },
+        (_, offset) => rangeBounds.top + offset,
+      );
+    return Array.from(selectedRows).sort((left, right) => left - right);
+  };
+  const selectedColumnsForFormatting = () => {
+    if (!data) return [];
+    if (rangeBounds)
+      return Array.from(
+        { length: rangeBounds.right - rangeBounds.left + 1 },
+        (_, offset) => rangeBounds.left + offset,
+      );
+    return Array.from(selectedColumns).sort((left, right) => left - right);
+  };
+  const commitLayoutChange = (next: WorkspaceLayout) => {
+    const normalized = cloneLayout(next);
+    if (JSON.stringify(normalized) === JSON.stringify(layout)) return;
+    rememberChange();
+    setLayout(normalized);
+    setIsDirty(true);
+    persistBrowserState(tags, annotations, getCurrentFilters(), normalized);
+  };
+  const applyCellFontSize = (value: number) => {
+    if (editorMode !== "edit" || !data || !hasCellSelection) return;
+    const fontSize = Math.min(
+      MAX_TABLE_FONT_SIZE,
+      Math.max(MIN_TABLE_FONT_SIZE, value),
+    );
+    const next = cloneLayout(layout);
+    if (selectionIsWholeTable) {
+      next.baseFontSize = fontSize;
+      next.rowFontSizes = {};
+      next.columnFontSizes = {};
+      next.cellFontSizes = {};
+    } else if (rangeBounds) {
+      for (let row = rangeBounds.top; row <= rangeBounds.bottom; row += 1)
+        for (
+          let column = rangeBounds.left;
+          column <= rangeBounds.right;
+          column += 1
+        )
+          next.cellFontSizes[`${row}:${column}`] = fontSize;
+    } else if (selectedRows.size) {
+      selectedRows.forEach((row) => {
+        next.rowFontSizes[String(row)] = fontSize;
+        for (let column = 0; column < data.headers.length; column += 1)
+          delete next.cellFontSizes[`${row}:${column}`];
+      });
+    } else {
+      selectedColumns.forEach((column) => {
+        next.columnFontSizes[String(column)] = fontSize;
+        for (let row = 0; row < data.rows.length; row += 1)
+          delete next.cellFontSizes[`${row}:${column}`];
+      });
+    }
+    commitLayoutChange(next);
+  };
+  const applyRowHeight = (value: number) => {
+    if (editorMode !== "edit" || !data || !hasCellSelection) return;
+    const rowHeight = Math.min(
+      MAX_TABLE_ROW_HEIGHT,
+      Math.max(MIN_TABLE_ROW_HEIGHT, value),
+    );
+    const rows = selectedRowsForFormatting();
+    if (!rows.length) return;
+    const next = cloneLayout(layout);
+    if (selectionIsWholeTable) {
+      next.baseRowHeight = rowHeight;
+      next.rowHeights = {};
+    } else {
+      rows.forEach((row) => {
+        if (rowHeight === next.baseRowHeight) delete next.rowHeights[String(row)];
+        else next.rowHeights[String(row)] = rowHeight;
+      });
+    }
+    commitLayoutChange(next);
+  };
+  const applyHeaderFontSize = (value: number) => {
+    if (editorMode !== "edit" || !data) return;
+    const columns = selectedColumnsForFormatting();
+    if (!columns.length) return;
+    const fontSize = Math.min(
+      MAX_TABLE_FONT_SIZE,
+      Math.max(MIN_TABLE_FONT_SIZE, value),
+    );
+    const next = cloneLayout(layout);
+    if (selectionIsWholeTable) {
+      next.baseColumnHeaderFontSize = fontSize;
+      next.columnHeaderFontSizes = {};
+    } else {
+      columns.forEach((column) => {
+        next.columnHeaderFontSizes[String(column)] = fontSize;
+      });
+    }
+    commitLayoutChange(next);
+  };
+  const resetSelectedFormatting = () => {
+    if (editorMode !== "edit" || !data || !hasCellSelection) return;
+    if (selectionIsWholeTable) {
+      commitLayoutChange(makeEmptyLayout());
+      return;
+    }
+    const next = cloneLayout(layout);
+    const rows = selectedRowsForFormatting();
+    const columns = selectedColumnsForFormatting();
+    if (rangeBounds) {
+      for (let row = rangeBounds.top; row <= rangeBounds.bottom; row += 1) {
+        delete next.rowHeights[String(row)];
+        delete next.rowFontSizes[String(row)];
+        for (
+          let column = rangeBounds.left;
+          column <= rangeBounds.right;
+          column += 1
+        )
+          delete next.cellFontSizes[`${row}:${column}`];
+      }
+      columns.forEach((column) => {
+        delete next.columnHeaderFontSizes[String(column)];
+      });
+    } else if (selectedRows.size) {
+      rows.forEach((row) => {
+        delete next.rowHeights[String(row)];
+        delete next.rowFontSizes[String(row)];
+        for (let column = 0; column < data.headers.length; column += 1)
+          delete next.cellFontSizes[`${row}:${column}`];
+      });
+    } else {
+      columns.forEach((column) => {
+        delete next.columnFontSizes[String(column)];
+        delete next.columnHeaderFontSizes[String(column)];
+        for (let row = 0; row < data.rows.length; row += 1)
+          delete next.cellFontSizes[`${row}:${column}`];
+      });
+    }
+    commitLayoutChange(next);
+  };
   const currentScope: Scope = selectedRange
     ? rangeSize === 1
       ? "cell"
@@ -2542,18 +2797,21 @@ function App() {
       const nextAnnotations = imported.hasAnnotations
         ? imported.annotations
         : annotations;
+      const nextLayout = imported.hasLayout ? imported.layout : layout;
       rememberChange();
       setTags(nextTags);
       setAnnotations(nextAnnotations);
+      setLayout(nextLayout);
       setIsDirty(true);
-      persistBrowserState(nextTags, nextAnnotations);
+      persistBrowserState(nextTags, nextAnnotations, getCurrentFilters(), nextLayout);
       if (isDesktop() && filePath) {
         await enqueueDesktopWrite(async () => {
-          if (imported.hasAnnotations)
+          if (imported.hasAnnotations || imported.hasLayout)
             await invoke("save_workspace", {
               csvPath: filePath,
               tags: nextTags,
               annotations: nextAnnotations,
+              layout: nextLayout,
             });
           else
             for (const tag of Object.values(imported.tags))
@@ -2692,27 +2950,70 @@ function App() {
     columnTagFilters,
   ]);
 
+  const rowHeightFor = (row: number, source = layout) =>
+    source.rowHeights[String(row)] ?? source.baseRowHeight;
+  const cellFontSizeFor = (row: number, column: number, source = layout) =>
+    source.cellFontSizes[`${row}:${column}`] ??
+    source.rowFontSizes[String(row)] ??
+    source.columnFontSizes[String(column)] ??
+    source.baseFontSize;
+  const headerFontSizeFor = (column: number, source = layout) =>
+    source.columnHeaderFontSizes[String(column)] ??
+    source.baseColumnHeaderFontSize;
+  const rowMetrics = useMemo(() => {
+    const count = visibleRows.length;
+    const base = layout.baseRowHeight;
+    const hasOverrides = Object.keys(layout.rowHeights).length > 0;
+    if (!count)
+      return {
+        totalHeight: 0,
+        offsetBefore: (_row: number) => 0,
+        rowAtOffset: (_offset: number) => 0,
+      };
+    if (!hasOverrides)
+      return {
+        totalHeight: count * base,
+        offsetBefore: (row: number) => row * base,
+        rowAtOffset: (offset: number) =>
+          Math.min(count - 1, Math.max(0, Math.floor(offset / base))),
+      };
+    const offsets = [0];
+    for (const item of visibleRows)
+      offsets.push(offsets[offsets.length - 1] + rowHeightFor(item.index));
+    return {
+      totalHeight: offsets[offsets.length - 1],
+      offsetBefore: (row: number) => offsets[Math.max(0, Math.min(count, row))],
+      rowAtOffset: (offset: number) => {
+        let low = 0;
+        let high = count;
+        while (low < high) {
+          const middle = Math.floor((low + high) / 2);
+          if (offsets[middle + 1] <= offset) low = middle + 1;
+          else high = middle;
+        }
+        return Math.min(count - 1, Math.max(0, low));
+      },
+    };
+  }, [layout, visibleRows]);
+
   const virtualRows = useMemo(() => {
     if (!visibleRows.length)
-      return { rows: [] as Array<{ row: string[]; index: number }>, top: 0, bottom: 0 };
-    const viewportRows = Math.ceil(
-      Math.max(tableViewport.height, 300) / tableRowHeight,
-    );
-    const firstRow = Math.floor(tableViewport.top / tableRowHeight);
-    const start = Math.max(
-      0,
-      Math.min(visibleRows.length - 1, firstRow - TABLE_OVERSCAN),
-    );
-    const end = Math.min(
-      visibleRows.length,
-      start + viewportRows + TABLE_OVERSCAN * 2,
-    );
+      return {
+        rows: [] as Array<{ row: string[]; index: number }>,
+        top: 0,
+        bottom: 0,
+      };
+    const viewportHeight = Math.max(tableViewport.height, 300);
+    const firstRow = rowMetrics.rowAtOffset(tableViewport.top);
+    const lastRow = rowMetrics.rowAtOffset(tableViewport.top + viewportHeight);
+    const start = Math.max(0, firstRow - TABLE_OVERSCAN);
+    const end = Math.min(visibleRows.length, lastRow + TABLE_OVERSCAN + 1);
     return {
       rows: visibleRows.slice(start, end),
-      top: start * tableRowHeight,
-      bottom: (visibleRows.length - end) * tableRowHeight,
+      top: rowMetrics.offsetBefore(start),
+      bottom: rowMetrics.totalHeight - rowMetrics.offsetBefore(end),
     };
-  }, [tableRowHeight, tableViewport, visibleRows]);
+  }, [rowMetrics, tableViewport, visibleRows]);
 
   const startEdit = (row: number, column: number) => {
     if (data && editorMode === "edit") {
@@ -2917,6 +3218,7 @@ function App() {
     setData(previous.data);
     setTags(previous.tags);
     setAnnotations(previous.annotations);
+    setLayout(cloneLayout(previous.layout));
     setHiddenColumns(new Set(previous.filters.hiddenColumns));
     setColumnFilters(previous.filters.columnFilters);
     setColumnValueSelections(previous.filters.columnValueSelections);
@@ -2941,6 +3243,7 @@ function App() {
     setData(next.data);
     setTags(next.tags);
     setAnnotations(next.annotations);
+    setLayout(cloneLayout(next.layout));
     setHiddenColumns(new Set(next.filters.hiddenColumns));
     setColumnFilters(next.filters.columnFilters);
     setColumnValueSelections(next.filters.columnValueSelections);
@@ -3025,13 +3328,20 @@ function App() {
       pointerId: event.pointerId,
     };
   };
-  const beginRowResize = (event: React.PointerEvent<HTMLElement>) => {
+  const beginRowResize = (
+    event: React.PointerEvent<HTMLElement>,
+    row: number,
+  ) => {
+    if (editorMode !== "edit" || !data) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    rememberChange();
+    setIsDirty(true);
     rowResizingRef.current = {
+      row,
       startY: event.clientY,
-      startHeight: tableRowHeight,
+      startHeight: rowHeightFor(row),
       pointerId: event.pointerId,
     };
   };
@@ -3039,13 +3349,18 @@ function App() {
   useEffect(() => {
     const pointerMove = (event: PointerEvent) => {
       if (rowResizingRef.current) {
-        const { startY, startHeight } = rowResizingRef.current;
-        setTableRowHeight(
-          Math.max(
-            MIN_TABLE_ROW_HEIGHT,
-            Math.min(MAX_TABLE_ROW_HEIGHT, startHeight + event.clientY - startY),
-          ),
+        const { row, startY, startHeight } = rowResizingRef.current;
+        const nextHeight = Math.max(
+          MIN_TABLE_ROW_HEIGHT,
+          Math.min(MAX_TABLE_ROW_HEIGHT, startHeight + event.clientY - startY),
         );
+        setLayout((previous) => {
+          const next = cloneLayout(previous);
+          if (nextHeight === next.baseRowHeight)
+            delete next.rowHeights[String(row)];
+          else next.rowHeights[String(row)] = nextHeight;
+          return next;
+        });
         return;
       }
       if (resizingRef.current) {
@@ -3230,6 +3545,7 @@ function App() {
             data,
             tags,
             annotations,
+            layout: cloneLayout(layout),
             filters: cloneFilters(getCurrentFilters()),
             updatedAt: Date.now(),
           },
@@ -3592,6 +3908,21 @@ function App() {
       (total, column) => total + (columnWidths[column] ?? 180),
       0,
     );
+  const formattingRows = selectedRowsForFormatting();
+  const formattingColumns = selectedColumnsForFormatting();
+  const selectedFontSize = rangeBounds && rangeSize === 1
+    ? cellFontSizeFor(rangeBounds.top, rangeBounds.left)
+    : selectedRows.size
+      ? layout.rowFontSizes[String(Math.min(...selectedRows))] ?? layout.baseFontSize
+      : selectedColumns.size
+        ? layout.columnFontSizes[String(Math.min(...selectedColumns))] ?? layout.baseFontSize
+        : layout.baseFontSize;
+  const selectedRowHeight = formattingRows.length
+    ? rowHeightFor(formattingRows[0])
+    : layout.baseRowHeight;
+  const selectedHeaderFontSize = formattingColumns.length
+    ? headerFontSizeFor(formattingColumns[0])
+    : layout.baseColumnHeaderFontSize;
   const selectedCellPreview =
     data && selectedRange && rangeSize === 1
       ? {
@@ -3737,6 +4068,7 @@ function App() {
                     <h3>常用</h3>
                     <p><kbd>⌘/Ctrl+S</kbd> 保存，<kbd>⌘/Ctrl+Z</kbd> 撤销，<kbd>⌘/Ctrl+Shift+Z</kbd> 重做。</p>
                     <p>点击标签快捷键后，按下新的组合键即可修改。</p>
+                    <p>编辑模式选中单元格、行或列后，“显示”只作用于选区；<kbd>⌘/Ctrl+A</kbd> 才应用整张表。行号下沿可拖动单行行高。</p>
                   </section>
                 </div>
               </div>
@@ -4084,43 +4416,73 @@ function App() {
                         <strong>显示</strong>
                         <button
                           className="value-filter-link"
-                          onClick={() => {
-                            setTableRowHeight(DEFAULT_TABLE_ROW_HEIGHT);
-                            setTableFontSize(DEFAULT_TABLE_FONT_SIZE);
-                          }}
+                          onClick={resetSelectedFormatting}
+                          disabled={editorMode !== "edit" || !hasCellSelection}
                         >
-                          重置
+                          重置选区
                         </button>
                       </div>
                       <label className="table-setting">
                         <span>字号</span>
-                        <output>{tableFontSize}px</output>
+                        <output>
+                          {editorMode === "edit" && hasCellSelection
+                            ? `${selectedFontSize}px`
+                            : "编辑模式选择单元格"}
+                        </output>
                         <input
                           type="range"
                           min={MIN_TABLE_FONT_SIZE}
                           max={MAX_TABLE_FONT_SIZE}
                           step="1"
-                          value={tableFontSize}
+                          value={selectedFontSize}
+                          disabled={editorMode !== "edit" || !hasCellSelection}
                           onChange={(event) =>
-                            setTableFontSize(Number(event.target.value))
+                            applyCellFontSize(Number(event.target.value))
                           }
                         />
                       </label>
                       <label className="table-setting">
                         <span>行高</span>
-                        <output>{tableRowHeight}px</output>
+                        <output>
+                          {editorMode === "edit" && formattingRows.length
+                            ? `${selectedRowHeight}px`
+                            : "编辑模式选择单元格"}
+                        </output>
                         <input
                           type="range"
                           min={MIN_TABLE_ROW_HEIGHT}
                           max={MAX_TABLE_ROW_HEIGHT}
                           step="1"
-                          value={tableRowHeight}
+                          value={selectedRowHeight}
+                          disabled={editorMode !== "edit" || !formattingRows.length}
                           onChange={(event) =>
-                            setTableRowHeight(Number(event.target.value))
+                            applyRowHeight(Number(event.target.value))
                           }
                         />
                       </label>
-                      <small>也可以拖动左侧行号下沿调整行高</small>
+                      <label className="table-setting">
+                        <span>列名字号</span>
+                        <output>
+                          {editorMode === "edit" && formattingColumns.length
+                            ? `${selectedHeaderFontSize}px`
+                            : "选择列或单元格"}
+                        </output>
+                        <input
+                          type="range"
+                          min={MIN_TABLE_FONT_SIZE}
+                          max={MAX_TABLE_FONT_SIZE}
+                          step="1"
+                          value={selectedHeaderFontSize}
+                          disabled={editorMode !== "edit" || !formattingColumns.length}
+                          onChange={(event) =>
+                            applyHeaderFontSize(Number(event.target.value))
+                          }
+                        />
+                      </label>
+                      <small>
+                        编辑模式下只影响当前选区；按 ⌘/Ctrl+A 后调整会应用整张表。
+                        行号下沿也可拖动单行。
+                      </small>
                     </div>
                   )}
                 </div>
@@ -4144,8 +4506,8 @@ function App() {
                   {
                     width: `${tableWidth}px`,
                     minWidth: `${tableWidth}px`,
-                    "--table-row-height": `${tableRowHeight}px`,
-                    "--table-font-size": `${tableFontSize}px`,
+                    "--table-row-height": `${layout.baseRowHeight}px`,
+                    "--table-font-size": `${layout.baseFontSize}px`,
                   } as React.CSSProperties
                 }
               >
@@ -4168,7 +4530,10 @@ function App() {
                       <th
                         key={header + column}
                         className={`${selectedColumns.has(column) ? "column-selected" : ""} ${columnFilters[header] || columnTagFilters[header] || hasColumnValueFilter(header) ? "filter-active" : ""}`}
-                        style={{ width: `${columnWidths[column] ?? 180}px` }}
+                        style={{
+                          width: `${columnWidths[column] ?? 180}px`,
+                          fontSize: `${headerFontSizeFor(column)}px`,
+                        }}
                         onClick={(event) => selectColumn(column, event)}
                         title="选择整列"
                       >
@@ -4420,18 +4785,27 @@ function App() {
                     <tr
                       key={index}
                       className={selectedRows.has(index) ? "row-selected" : ""}
+                      style={
+                        {
+                          "--row-height": `${rowHeightFor(index)}px`,
+                        } as React.CSSProperties
+                      }
                     >
                       <td
                         className="row-index"
                         onClick={(event) => selectRow(index, event)}
                       >
                         {String(index + 1).padStart(2, "0")}
-                        <span
-                          className="row-resize-handle"
-                          onPointerDown={beginRowResize}
-                          onClick={(event) => event.stopPropagation()}
-                          aria-label="调整行高"
-                        />
+                        {editorMode === "edit" && (
+                          <span
+                            className="row-resize-handle"
+                            onPointerDown={(event) =>
+                              beginRowResize(event, index)
+                            }
+                            onClick={(event) => event.stopPropagation()}
+                            aria-label="调整行高"
+                          />
+                        )}
                       </td>
                       {row.map((cell, column) => {
                         if (hiddenColumns.has(column)) return null;
@@ -4459,6 +4833,7 @@ function App() {
                             }}
                             style={{
                               width: `${columnWidths[column] ?? 180}px`,
+                              fontSize: `${cellFontSizeFor(index, column)}px`,
                               "--cell-mark-color":
                                 tags[cellTags[0]]?.color ?? "#2457ff",
                             } as React.CSSProperties}

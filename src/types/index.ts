@@ -18,3 +18,14 @@ export interface ParsedData {
   rowCount: number;
   columnCount: number;
 }
+
+export interface WorkspaceLayout {
+  baseRowHeight: number;
+  baseFontSize: number;
+  baseColumnHeaderFontSize: number;
+  rowHeights: Record<string, number>;
+  rowFontSizes: Record<string, number>;
+  columnFontSizes: Record<string, number>;
+  cellFontSizes: Record<string, number>;
+  columnHeaderFontSizes: Record<string, number>;
+}

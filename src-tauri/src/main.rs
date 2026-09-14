@@ -31,10 +31,40 @@ pub struct Annotations {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceLayout {
+    pub base_row_height: f64,
+    pub base_font_size: f64,
+    pub base_column_header_font_size: f64,
+    pub row_heights: HashMap<String, f64>,
+    pub row_font_sizes: HashMap<String, f64>,
+    pub column_font_sizes: HashMap<String, f64>,
+    pub cell_font_sizes: HashMap<String, f64>,
+    pub column_header_font_sizes: HashMap<String, f64>,
+}
+
+impl Default for WorkspaceLayout {
+    fn default() -> Self {
+        Self {
+            base_row_height: 38.0,
+            base_font_size: 13.0,
+            base_column_header_font_size: 11.0,
+            row_heights: HashMap::new(),
+            row_font_sizes: HashMap::new(),
+            column_font_sizes: HashMap::new(),
+            cell_font_sizes: HashMap::new(),
+            column_header_font_sizes: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagsFile {
     pub version: u32,
     pub tags: HashMap<String, Tag>,
     pub annotations: Annotations,
+    #[serde(default)]
+    pub layout: WorkspaceLayout,
 }
 
 impl Default for TagsFile {
@@ -43,6 +73,7 @@ impl Default for TagsFile {
             version: 1,
             tags: HashMap::new(),
             annotations: Annotations::default(),
+            layout: WorkspaceLayout::default(),
         }
     }
 }
@@ -182,9 +213,18 @@ fn save_workspace(
     csv_path: String,
     tags: HashMap<String, Tag>,
     annotations: Annotations,
+    layout: WorkspaceLayout,
 ) -> Result<(), String> {
     let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
-    save_tags(&csv_path, &TagsFile { version: 1, tags, annotations })
+    save_tags(
+        &csv_path,
+        &TagsFile {
+            version: 1,
+            tags,
+            annotations,
+            layout,
+        },
+    )
 }
 
 #[tauri::command]
@@ -197,6 +237,12 @@ fn get_tags(csv_path: String) -> Vec<Tag> {
 fn get_annotations(csv_path: String) -> Annotations {
     let tf = load_tags(&csv_path);
     tf.annotations
+}
+
+#[tauri::command]
+fn get_layout(csv_path: String) -> WorkspaceLayout {
+    let tf = load_tags(&csv_path);
+    tf.layout
 }
 
 #[tauri::command]
@@ -456,7 +502,12 @@ mod tests {
             dataset: vec!["remove".to_string()],
         };
         let tags = HashMap::from([(keep.name.clone(), keep), (remove.name.clone(), remove)]);
-        save_workspace(csv_path.clone(), tags, annotations)
+        save_workspace(
+            csv_path.clone(),
+            tags,
+            annotations,
+            WorkspaceLayout::default(),
+        )
             .expect("initial workspace should be written");
 
         delete_tag(csv_path.clone(), "remove".to_string()).expect("tag should be deleted");
@@ -507,6 +558,7 @@ fn main() {
             save_workspace,
             get_tags,
             get_annotations,
+            get_layout,
             create_tag,
             update_tag,
             delete_tag,
