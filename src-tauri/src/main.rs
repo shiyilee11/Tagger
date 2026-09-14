@@ -173,6 +173,11 @@ fn save_csv(
 }
 
 #[tauri::command]
+fn write_export_file(path: String, content: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|error| format!("{path}: {error}"))
+}
+
+#[tauri::command]
 fn save_workspace(
     csv_path: String,
     tags: HashMap<String, Tag>,
@@ -466,6 +471,25 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(directory);
     }
+
+    #[test]
+    fn write_export_file_writes_binary_content() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "tagger-export-{suffix}-{}-binary.zip",
+            std::process::id()
+        ));
+        let path = path.to_string_lossy().into_owned();
+        let content = vec![0x50, 0x4b, 0x03, 0x04, 0x00, 0xff];
+
+        write_export_file(path.clone(), content.clone()).expect("export should be written");
+
+        assert_eq!(std::fs::read(&path).expect("export should be readable"), content);
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -479,6 +503,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_csv,
             save_csv,
+            write_export_file,
             save_workspace,
             get_tags,
             get_annotations,

@@ -15,8 +15,6 @@ import {
   readFile,
   readTextFile,
   stat,
-  writeFile,
-  writeTextFile,
 } from "@tauri-apps/plugin-fs";
 import type { Annotations, ParsedData, Tag } from "./types";
 import { parseDelimited, parseDelimitedFile as parseDelimitedFileOnMain } from "./csvParser";
@@ -360,8 +358,12 @@ async function exportFile(
     filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
   });
   if (!target) return false;
-  if (typeof content === "string") await writeTextFile(target, content);
-  else await writeFile(target, content);
+  const bytes =
+    typeof content === "string" ? new TextEncoder().encode(content) : content;
+  await invoke("write_export_file", {
+    path: target,
+    content: Array.from(bytes),
+  });
   return true;
 }
 
