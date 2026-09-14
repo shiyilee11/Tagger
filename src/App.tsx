@@ -3175,6 +3175,8 @@ function App() {
       showNotice(`导出失败：${String(error)}`);
     }
     setShowExportMenu(false);
+    if (exported)
+      showNotice(choice === "both" ? "已导出配套 ZIP" : "已导出");
     if (
       exported &&
       (choice === "csv" || choice === "both") &&
@@ -3196,8 +3198,12 @@ function App() {
     let exportedCount = 0;
     try {
       if (choice === "both") {
+        const bundleName =
+          selected.length === 1
+            ? `${selected[0].fileName}.zip`
+            : `tagger-export-${selected.length}.zip`;
         const exported = await exportFile(
-          `tagger-export-${selected.length}.zip`,
+          bundleName,
           new Uint8Array(await createArchiveBundle(selected).arrayBuffer()),
           "application/zip",
           "zip",
@@ -3537,11 +3543,12 @@ function App() {
                   setShowExportMenu(false);
               }}
             >
-              <button
-                className="topbar-button primary"
-                onClick={() => setShowExportMenu(true)}
-                aria-expanded={showExportMenu}
-              >
+                <button
+                  className="topbar-button primary"
+                  onClick={() => void exportChoice("both")}
+                  aria-expanded={showExportMenu}
+                  title="导出配套 ZIP（CSV/TSV、标签 JSON、样例 JSON）"
+                >
                 导出
               </button>
               {showExportMenu && (
@@ -3551,7 +3558,7 @@ function App() {
                     className="export-option default"
                     onClick={() => exportChoice("both")}
                   >
-                    <span>CSV + 标签</span>
+                    <span>配套 ZIP</span>
                     <small>默认</small>
                   </button>
                   <button
@@ -3691,8 +3698,9 @@ function App() {
               <button
                 className="topbar-button primary archive-export-button"
                 disabled={!selectedArchiveSlots.size}
-                onClick={() => setShowArchiveExportMenu(true)}
+                onClick={() => void exportArchiveChoice("both")}
                 aria-expanded={showArchiveExportMenu}
+                title="导出配套 ZIP（CSV/TSV、标签 JSON、样例 JSON）"
               >
                 导出{selectedArchiveSlots.size ? ` · ${selectedArchiveSlots.size}` : ""}
               </button>
@@ -3703,7 +3711,7 @@ function App() {
                     className="export-option default"
                     onClick={() => exportArchiveChoice("both")}
                   >
-                    <span>CSV + 标签 JSON</span>
+                    <span>配套 ZIP</span>
                     <small>默认</small>
                   </button>
                   <button
