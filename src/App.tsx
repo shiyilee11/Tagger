@@ -99,7 +99,12 @@ const ARCHIVE_STORE_NAME = "archives";
 const MARK_STYLE_KEY = "tagger-mark-style-v1";
 const TAG_DRAFT_SHORTCUT = "__tag_draft__";
 const BROWSER_FILE_LIMIT_BYTES = 3 * 1024 * 1024;
-const TABLE_ROW_HEIGHT = 38;
+const DEFAULT_TABLE_ROW_HEIGHT = 38;
+const MIN_TABLE_ROW_HEIGHT = 24;
+const MAX_TABLE_ROW_HEIGHT = 120;
+const DEFAULT_TABLE_FONT_SIZE = 13;
+const MIN_TABLE_FONT_SIZE = 8;
+const MAX_TABLE_FONT_SIZE = 32;
 const TABLE_OVERSCAN = 8;
 const TAG_TEMPLATE = `{
   "schema": "tagger.tags/v1",
@@ -128,6 +133,16 @@ const TAG_TEMPLATE = `{
 
 const isDesktop = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+function readNumericPreference(
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+) {
+  if (typeof window === "undefined") return fallback;
+  const value = Number(localStorage.getItem(key));
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+}
 const makeEmptyAnnotations = (): Annotations => ({
   rows: {},
   cells: {},
@@ -805,6 +820,23 @@ function App() {
   const [globalValue, setGlobalValue] = useState("");
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set());
   const [showColumnVisibility, setShowColumnVisibility] = useState(false);
+  const [showTableSettings, setShowTableSettings] = useState(false);
+  const [tableRowHeight, setTableRowHeight] = useState(() =>
+    readNumericPreference(
+      "tagger-table-row-height",
+      DEFAULT_TABLE_ROW_HEIGHT,
+      MIN_TABLE_ROW_HEIGHT,
+      MAX_TABLE_ROW_HEIGHT,
+    ),
+  );
+  const [tableFontSize, setTableFontSize] = useState(() =>
+    readNumericPreference(
+      "tagger-table-font-size",
+      DEFAULT_TABLE_FONT_SIZE,
+      MIN_TABLE_FONT_SIZE,
+      MAX_TABLE_FONT_SIZE,
+    ),
+  );
   const [columnFilters, setColumnFilters] = useState<Record<string, string>>(
     {},
   );
@@ -885,6 +917,11 @@ function App() {
     null,
   );
   const draggingRef = useRef(false);
+  const rowResizingRef = useRef<{
+    startY: number;
+    startHeight: number;
+    pointerId: number;
+  } | null>(null);
   const resizingRef = useRef<{
     column: number;
     startX: number;
@@ -1099,6 +1136,12 @@ function App() {
   useEffect(() => {
     localStorage.setItem(MARK_STYLE_KEY, markStyle);
   }, [markStyle]);
+  useEffect(() => {
+    localStorage.setItem("tagger-table-row-height", String(tableRowHeight));
+  }, [tableRowHeight]);
+  useEffect(() => {
+    localStorage.setItem("tagger-table-font-size", String(tableFontSize));
+  }, [tableFontSize]);
 
   useEffect(() => {
     const mouseMove = (event: MouseEvent) => {
@@ -1278,6 +1321,7 @@ function App() {
       setGlobalValue("");
       setHiddenColumns(new Set());
       setShowColumnVisibility(false);
+      setShowTableSettings(false);
       setColumnFilters({});
       setColumnValueSelections({});
       setColumnValueFilterModes({});
@@ -2475,6 +2519,18 @@ function App() {
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, [showColumnVisibility]);
 
+  useEffect(() => {
+    if (!showTableSettings) return undefined;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".table-settings-wrap"))
+        return;
+      setShowTableSettings(false);
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [showTableSettings]);
+
   const handleTagFileInput = async (
     event: React.ChangeEvent<HTMLInputElement>,
   ) => {
@@ -2639,8 +2695,10 @@ function App() {
   const virtualRows = useMemo(() => {
     if (!visibleRows.length)
       return { rows: [] as Array<{ row: string[]; index: number }>, top: 0, bottom: 0 };
-    const viewportRows = Math.ceil(Math.max(tableViewport.height, 300) / TABLE_ROW_HEIGHT);
-    const firstRow = Math.floor(tableViewport.top / TABLE_ROW_HEIGHT);
+    const viewportRows = Math.ceil(
+      Math.max(tableViewport.height, 300) / tableRowHeight,
+    );
+    const firstRow = Math.floor(tableViewport.top / tableRowHeight);
     const start = Math.max(
       0,
       Math.min(visibleRows.length - 1, firstRow - TABLE_OVERSCAN),
@@ -2651,10 +2709,10 @@ function App() {
     );
     return {
       rows: visibleRows.slice(start, end),
-      top: start * TABLE_ROW_HEIGHT,
-      bottom: (visibleRows.length - end) * TABLE_ROW_HEIGHT,
+      top: start * tableRowHeight,
+      bottom: (visibleRows.length - end) * tableRowHeight,
     };
-  }, [tableViewport, visibleRows]);
+  }, [tableRowHeight, tableViewport, visibleRows]);
 
   const startEdit = (row: number, column: number) => {
     if (data && editorMode === "edit") {
@@ -2967,9 +3025,29 @@ function App() {
       pointerId: event.pointerId,
     };
   };
+  const beginRowResize = (event: React.PointerEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    rowResizingRef.current = {
+      startY: event.clientY,
+      startHeight: tableRowHeight,
+      pointerId: event.pointerId,
+    };
+  };
 
   useEffect(() => {
     const pointerMove = (event: PointerEvent) => {
+      if (rowResizingRef.current) {
+        const { startY, startHeight } = rowResizingRef.current;
+        setTableRowHeight(
+          Math.max(
+            MIN_TABLE_ROW_HEIGHT,
+            Math.min(MAX_TABLE_ROW_HEIGHT, startHeight + event.clientY - startY),
+          ),
+        );
+        return;
+      }
       if (resizingRef.current) {
         const { column, startX, startWidth } = resizingRef.current;
         setColumnWidths((previous) => ({
@@ -2979,6 +3057,11 @@ function App() {
       }
     };
     const pointerUp = (event: PointerEvent) => {
+      if (
+        rowResizingRef.current &&
+        event.pointerId === rowResizingRef.current.pointerId
+      )
+        rowResizingRef.current = null;
       if (
         resizingRef.current &&
         event.pointerId !== resizingRef.current.pointerId
@@ -3258,6 +3341,7 @@ function App() {
     setEditingCell(null);
     setOpenColumnFilter(null);
     setShowExportMenu(false);
+    setShowTableSettings(false);
   }, [showNotice]);
 
   const handleKeyDown = useCallback(
@@ -3291,6 +3375,11 @@ function App() {
       if (showColumnVisibility && event.key === "Escape") {
         event.preventDefault();
         setShowColumnVisibility(false);
+        return;
+      }
+      if (showTableSettings && event.key === "Escape") {
+        event.preventDefault();
+        setShowTableSettings(false);
         return;
       }
       if (showArchiveExportMenu && event.key === "Escape") {
@@ -3496,6 +3585,13 @@ function App() {
   const visibleColumnIndexes = data
     ? data.headers.map((_, index) => index).filter((index) => !hiddenColumns.has(index))
     : [];
+  const tableWidth =
+    52 +
+    150 +
+    visibleColumnIndexes.reduce(
+      (total, column) => total + (columnWidths[column] ?? 180),
+      0,
+    );
   const selectedCellPreview =
     data && selectedRange && rangeSize === 1
       ? {
@@ -3970,6 +4066,64 @@ function App() {
                     </div>
                   )}
                 </div>
+                <div className="table-settings-wrap">
+                  <button
+                    className={`small-button ${showTableSettings ? "active" : ""}`}
+                    onClick={() => setShowTableSettings((previous) => !previous)}
+                    aria-expanded={showTableSettings}
+                    title="调整表格字号和行高"
+                  >
+                    显示
+                  </button>
+                  {showTableSettings && (
+                    <div
+                      className="table-settings-menu"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <div className="table-settings-head">
+                        <strong>显示</strong>
+                        <button
+                          className="value-filter-link"
+                          onClick={() => {
+                            setTableRowHeight(DEFAULT_TABLE_ROW_HEIGHT);
+                            setTableFontSize(DEFAULT_TABLE_FONT_SIZE);
+                          }}
+                        >
+                          重置
+                        </button>
+                      </div>
+                      <label className="table-setting">
+                        <span>字号</span>
+                        <output>{tableFontSize}px</output>
+                        <input
+                          type="range"
+                          min={MIN_TABLE_FONT_SIZE}
+                          max={MAX_TABLE_FONT_SIZE}
+                          step="1"
+                          value={tableFontSize}
+                          onChange={(event) =>
+                            setTableFontSize(Number(event.target.value))
+                          }
+                        />
+                      </label>
+                      <label className="table-setting">
+                        <span>行高</span>
+                        <output>{tableRowHeight}px</output>
+                        <input
+                          type="range"
+                          min={MIN_TABLE_ROW_HEIGHT}
+                          max={MAX_TABLE_ROW_HEIGHT}
+                          step="1"
+                          value={tableRowHeight}
+                          onChange={(event) =>
+                            setTableRowHeight(Number(event.target.value))
+                          }
+                        />
+                      </label>
+                      <small>也可以拖动左侧行号下沿调整行高</small>
+                    </div>
+                  )}
+                </div>
                 <button className="small-button" onClick={clearAllFilters}>
                   清除筛选
                 </button>
@@ -3984,7 +4138,17 @@ function App() {
               <div>{selectedCellPreview?.value || (selectedCellPreview ? "空白" : "")}</div>
             </div>
             <div className="table-wrap" ref={tableWrapRef}>
-              <table className="data-table">
+              <table
+                className="data-table"
+                style={
+                  {
+                    width: `${tableWidth}px`,
+                    minWidth: `${tableWidth}px`,
+                    "--table-row-height": `${tableRowHeight}px`,
+                    "--table-font-size": `${tableFontSize}px`,
+                  } as React.CSSProperties
+                }
+              >
                 <colgroup>
                   <col className="index-col" />
                   {visibleColumnIndexes.map((index) => (
@@ -4262,6 +4426,12 @@ function App() {
                         onClick={(event) => selectRow(index, event)}
                       >
                         {String(index + 1).padStart(2, "0")}
+                        <span
+                          className="row-resize-handle"
+                          onPointerDown={beginRowResize}
+                          onClick={(event) => event.stopPropagation()}
+                          aria-label="调整行高"
+                        />
                       </td>
                       {row.map((cell, column) => {
                         if (hiddenColumns.has(column)) return null;
@@ -4294,52 +4464,54 @@ function App() {
                             } as React.CSSProperties}
                             title={cellTags.length ? `标签：${cellTags.join("、")}` : "拖动选择，双击编辑"}
                           >
-                            {isEditing ? (
-                              <input
-                                autoFocus
-                                value={editingValue}
-                                onChange={(event) =>
-                                  setEditingValue(event.target.value)
-                                }
-                                onBlur={finishEdit}
-                                onKeyDown={(event) => {
-                                  if (event.key === "Enter") finishEdit();
-                                  if (event.key === "Escape")
-                                    setEditingCell(null);
-                                }}
-                              />
-                            ) : (
-                              <span className="cell-value">
-                                {cell || <span className="empty-cell">—</span>}
-                              </span>
-                            )}
-                            {markStyle === "dot" && cellTags.map((tag) => (
-                              <i
-                                key={tag}
-                                className="cell-mark"
-                                style={{
-                                  backgroundColor: tags[tag]?.color,
-                                  color: tags[tag]?.color,
-                                }}
-                                title={tag}
-                              />
-                            ))}
-                            {markStyle === "fill" && cellTags.length > 1 && (
-                              <span
-                                className="cell-mark-overview"
-                                title={`多个标签：${cellTags.join("、")}`}
-                              >
-                                {cellTags.map((tag) => (
-                                  <i
-                                    key={tag}
-                                    style={{
-                                      backgroundColor:
-                                        tags[tag]?.color ?? "#8c8c92",
-                                    }}
-                                  />
-                                ))}
-                              </span>
-                            )}
+                            <div className="cell-content">
+                              {isEditing ? (
+                                <input
+                                  autoFocus
+                                  value={editingValue}
+                                  onChange={(event) =>
+                                    setEditingValue(event.target.value)
+                                  }
+                                  onBlur={finishEdit}
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Enter") finishEdit();
+                                    if (event.key === "Escape")
+                                      setEditingCell(null);
+                                  }}
+                                />
+                              ) : (
+                                <span className="cell-value">
+                                  {cell || <span className="empty-cell">—</span>}
+                                </span>
+                              )}
+                              {markStyle === "dot" && cellTags.map((tag) => (
+                                <i
+                                  key={tag}
+                                  className="cell-mark"
+                                  style={{
+                                    backgroundColor: tags[tag]?.color,
+                                    color: tags[tag]?.color,
+                                  }}
+                                  title={tag}
+                                />
+                              ))}
+                              {markStyle === "fill" && cellTags.length > 1 && (
+                                <span
+                                  className="cell-mark-overview"
+                                  title={`多个标签：${cellTags.join("、")}`}
+                                >
+                                  {cellTags.map((tag) => (
+                                    <i
+                                      key={tag}
+                                      style={{
+                                        backgroundColor:
+                                          tags[tag]?.color ?? "#8c8c92",
+                                      }}
+                                    />
+                                  ))}
+                                </span>
+                              )}
+                            </div>
                           </td>
                         );
                       })}
