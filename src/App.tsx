@@ -893,6 +893,11 @@ function App() {
   const futureRef = useRef<WorkspaceSnapshot[]>([]);
   const savedSnapshotRef = useRef<WorkspaceSnapshot | null>(null);
   const desktopWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const workspaceRevisionRef = useRef(0);
+  const isSavingRef = useRef(false);
+  const tableScrollRestoreRef = useRef<{ top: number; left: number } | null>(
+    null,
+  );
 
   const enqueueDesktopWrite = useCallback(
     <T,>(operation: () => Promise<T>) => {
@@ -987,6 +992,40 @@ function App() {
     setNotice(message);
     window.setTimeout(() => setNotice(""), 2200);
   }, []);
+  const persistDesktopWorkspace = useCallback(
+    async (
+      nextTags: Record<string, Tag>,
+      nextAnnotations: Annotations,
+      failureMessage: string,
+    ) => {
+      if (!isDesktop() || !filePath) return;
+      try {
+        await enqueueDesktopWrite(() =>
+          invoke("save_workspace", {
+            csvPath: filePath,
+            tags: nextTags,
+            annotations: nextAnnotations,
+          }),
+        );
+      } catch (error) {
+        showNotice(`${failureMessage}：${String(error)}`);
+      }
+    },
+    [enqueueDesktopWrite, filePath, showNotice],
+  );
+  const deleteDesktopTag = useCallback(
+    async (name: string) => {
+      if (!isDesktop() || !filePath) return;
+      try {
+        await enqueueDesktopWrite(() =>
+          invoke("delete_tag", { csvPath: filePath, name }),
+        );
+      } catch (error) {
+        showNotice(`删除标签失败：${String(error)}`);
+      }
+    },
+    [enqueueDesktopWrite, filePath, showNotice],
+  );
 
   const beginTagPanelDrag = (event: React.MouseEvent) => {
     if ((event.target as Element).closest("button")) return;
@@ -1216,6 +1255,7 @@ function App() {
       slot: number | null,
       sizeBytes = 0,
     ) => {
+      workspaceRevisionRef.current = 0;
       setWorkspaceLoaded(false);
       setIsDirty(false);
       setShowSaveDialog(false);
@@ -1614,6 +1654,7 @@ function App() {
   const openArchive = (slot: number) => {
     const saved = archives[slot];
     if (saved) {
+      workspaceRevisionRef.current = 0;
       setIsDirty(false);
       setShowSaveDialog(false);
       historyRef.current = [];
@@ -1694,6 +1735,7 @@ function App() {
     if (!snapshot) return;
     historyRef.current = [...historyRef.current, snapshot].slice(-100);
     futureRef.current = [];
+    workspaceRevisionRef.current += 1;
   };
 
   const commitEditing = (): ParsedData | null => {
@@ -1717,8 +1759,12 @@ function App() {
     async (dataOverride?: ParsedData) => {
       const dataToSave = dataOverride ?? data;
       if (!dataToSave || !fileName) return true;
-      if (isSaving) return false;
+      if (isSavingRef.current) return false;
+      const revisionAtStart = workspaceRevisionRef.current;
+      const tagsToSave = cloneTags(tags);
+      const annotationsToSave = cloneAnnotations(annotations);
       setIsSaving(true);
+      isSavingRef.current = true;
       try {
         let targetPath = filePath;
         let targetFileName = fileName;
@@ -1748,47 +1794,55 @@ function App() {
             });
             await invoke("save_workspace", {
               csvPath: targetPath,
-              tags,
-              annotations,
+              tags: tagsToSave,
+              annotations: annotationsToSave,
             });
           });
         }
         if (targetPath !== filePath) setFilePath(targetPath);
         if (targetFileName !== fileName) setFileName(targetFileName);
-        const snapshot: ArchiveSlot = {
-          fileName: targetFileName,
-          filePath: targetPath,
-          delimiter,
-          sizeBytes: fileSizeBytes || undefined,
-          data: dataToSave,
-          tags,
-          annotations,
-          filters: filtersToSave,
-          updatedAt: Date.now(),
-        };
-        if (archiveSlot !== null) {
-          const nextArchives = archives.map((item, index) =>
-            index === archiveSlot ? snapshot : item,
-          );
-          setArchives(nextArchives);
-          persistArchives(nextArchives);
+        const hasNewerChanges = workspaceRevisionRef.current !== revisionAtStart;
+        if (!hasNewerChanges) {
+          const snapshot: ArchiveSlot = {
+            fileName: targetFileName,
+            filePath: targetPath,
+            delimiter,
+            sizeBytes: fileSizeBytes || undefined,
+            data: dataToSave,
+            tags: tagsToSave,
+            annotations: annotationsToSave,
+            filters: filtersToSave,
+            updatedAt: Date.now(),
+          };
+          if (archiveSlot !== null) {
+            const nextArchives = archives.map((item, index) =>
+              index === archiveSlot ? snapshot : item,
+            );
+            setArchives(nextArchives);
+            persistArchives(nextArchives);
+          }
+          persistBrowserState(tagsToSave, annotationsToSave, filtersToSave);
+          savedSnapshotRef.current = {
+            data: cloneData(dataToSave),
+            tags: tagsToSave,
+            annotations: annotationsToSave,
+            filters: filtersToSave,
+          };
+          setIsDirty(false);
         }
-        persistBrowserState(tags, annotations, filtersToSave);
-        savedSnapshotRef.current = {
-          data: cloneData(dataToSave),
-          tags: cloneTags(tags),
-          annotations: cloneAnnotations(annotations),
-          filters: filtersToSave,
-        };
-        setIsDirty(false);
         showNotice(
-          isDesktop() && targetPath ? `已保存：${targetPath}` : "已保存",
+          hasNewerChanges
+            ? "已保存当前状态，仍有新修改"
+            : isDesktop() && targetPath
+              ? `已保存：${targetPath}`
+              : "已保存",
         );
         return true;
       } catch (error) {
         showNotice(`保存失败：${String(error)}`);
         return false;
       } finally {
+        isSavingRef.current = false;
         setIsSaving(false);
       }
     },
@@ -1803,7 +1857,6 @@ function App() {
       filePath,
       getCurrentFilters,
       enqueueDesktopWrite,
-      isSaving,
       persistArchives,
       persistBrowserState,
       showNotice,
@@ -1812,7 +1865,11 @@ function App() {
   );
 
   const saveWorkspaceAs = async () => {
-    if (!data || !fileName || !isDesktop() || isSaving) return false;
+    if (!data || !fileName || !isDesktop() || isSavingRef.current) return false;
+    const revisionAtStart = workspaceRevisionRef.current;
+    const dataToSave = data;
+    const tagsToSave = cloneTags(tags);
+    const annotationsToSave = cloneAnnotations(annotations);
     const extension = delimiter === "\t" ? "tsv" : "csv";
     let target: string | null;
     try {
@@ -1833,6 +1890,7 @@ function App() {
     if (!target) return false;
 
     setIsSaving(true);
+    isSavingRef.current = true;
     try {
       const nextFileName = await basename(target);
       const filtersToSave = cloneFilters(getCurrentFilters());
@@ -1845,45 +1903,51 @@ function App() {
         });
         await invoke("save_workspace", {
           csvPath: target,
-          tags,
-          annotations,
+          tags: tagsToSave,
+          annotations: annotationsToSave,
         });
       });
 
       setFileName(nextFileName);
       setFilePath(target);
-      const snapshot: ArchiveSlot = {
-        fileName: nextFileName,
-        filePath: target,
-        delimiter,
-        sizeBytes: fileSizeBytes || undefined,
-        data,
-        tags,
-        annotations,
-        filters: filtersToSave,
-        updatedAt: Date.now(),
-      };
-      if (archiveSlot !== null) {
-        const nextArchives = archives.map((item, index) =>
-          index === archiveSlot ? snapshot : item,
-        );
-        setArchives(nextArchives);
-        persistArchives(nextArchives);
+      const hasNewerChanges = workspaceRevisionRef.current !== revisionAtStart;
+      if (!hasNewerChanges) {
+        const snapshot: ArchiveSlot = {
+          fileName: nextFileName,
+          filePath: target,
+          delimiter,
+          sizeBytes: fileSizeBytes || undefined,
+          data: dataToSave,
+          tags: tagsToSave,
+          annotations: annotationsToSave,
+          filters: filtersToSave,
+          updatedAt: Date.now(),
+        };
+        if (archiveSlot !== null) {
+          const nextArchives = archives.map((item, index) =>
+            index === archiveSlot ? snapshot : item,
+          );
+          setArchives(nextArchives);
+          persistArchives(nextArchives);
+        }
+        persistBrowserState(tagsToSave, annotationsToSave, filtersToSave);
+        savedSnapshotRef.current = {
+          data: cloneData(dataToSave),
+          tags: tagsToSave,
+          annotations: annotationsToSave,
+          filters: filtersToSave,
+        };
+        setIsDirty(false);
       }
-      persistBrowserState(tags, annotations, filtersToSave);
-      savedSnapshotRef.current = {
-        data: cloneData(data),
-        tags: cloneTags(tags),
-        annotations: cloneAnnotations(annotations),
-        filters: filtersToSave,
-      };
-      setIsDirty(false);
-      showNotice(`已保存：${target}`);
+      showNotice(
+        hasNewerChanges ? "已保存当前状态，仍有新修改" : `已保存：${target}`,
+      );
       return true;
     } catch (error) {
       showNotice(`保存失败：${String(error)}`);
       return false;
     } finally {
+      isSavingRef.current = false;
       setIsSaving(false);
     }
   };
@@ -2234,7 +2298,7 @@ function App() {
     ],
   );
 
-  const handleCreateTag = async () => {
+  const handleCreateTag = () => {
     const name = tagDraft.name.trim();
     if (!name) return;
     const originalName = tagDraft.originalName;
@@ -2273,22 +2337,6 @@ function App() {
     setTags(nextTags);
     setIsDirty(true);
     persistBrowserState(nextTags, nextAnnotations);
-    if (isDesktop() && filePath) {
-      try {
-        await enqueueDesktopWrite(() =>
-          originalName
-            ? invoke("update_tag", {
-                csvPath: filePath,
-                oldName: originalName,
-                ...nextTag,
-              })
-            : invoke("create_tag", { csvPath: filePath, ...nextTag }),
-        );
-      } catch (error) {
-        showNotice(`保存失败：${String(error)}`);
-        return;
-      }
-    }
     setShowTagDialog(false);
     setCapturingShortcut(null);
     setTagDraft({
@@ -2297,9 +2345,10 @@ function App() {
       color: TAG_COLORS[tagList.length % TAG_COLORS.length],
       shortcut: String(Math.min(tagList.length + 1, 9)),
     });
+    void persistDesktopWorkspace(nextTags, nextAnnotations, "标签保存失败");
   };
 
-  const handleDeleteTag = async (name: string) => {
+  const handleDeleteTag = (name: string) => {
     const nextTags = { ...tags };
     delete nextTags[name];
     const nextAnnotations = cloneAnnotations(annotations);
@@ -2323,20 +2372,6 @@ function App() {
         ].filter((item) => item !== name);
       }),
     );
-    if (isDesktop() && filePath) {
-      try {
-        await enqueueDesktopWrite(() =>
-          invoke("save_workspace", {
-            csvPath: filePath,
-            tags: nextTags,
-            annotations: nextAnnotations,
-          }),
-        );
-      } catch (error) {
-        showNotice(`删除失败：${String(error)}`);
-        return;
-      }
-    }
     rememberChange();
     setTags(nextTags);
     setAnnotations(nextAnnotations);
@@ -2350,6 +2385,7 @@ function App() {
       color: TAG_COLORS[tagList.length % TAG_COLORS.length],
       shortcut: String(Math.min(tagList.length + 1, 9)),
     });
+    void deleteDesktopTag(name);
   };
 
   const updateShortcut = useCallback(
@@ -2362,19 +2398,11 @@ function App() {
       setTags(nextTags);
       setIsDirty(true);
       persistBrowserState(nextTags, annotations);
-      if (isDesktop() && filePath)
-        try {
-          await enqueueDesktopWrite(() =>
-            invoke("create_tag", { csvPath: filePath, ...nextTag }),
-          );
-        } catch (error) {
-          showNotice(`保存失败：${String(error)}`);
-        }
+      await persistDesktopWorkspace(nextTags, annotations, "快捷键保存失败");
     },
     [
       annotations,
-      enqueueDesktopWrite,
-      filePath,
+      persistDesktopWorkspace,
       persistBrowserState,
       showNotice,
       tags,
@@ -2581,7 +2609,21 @@ function App() {
   useEffect(() => {
     const element = tableWrapRef.current;
     if (!element) return;
+    const restore = tableScrollRestoreRef.current;
+    tableScrollRestoreRef.current = null;
+    if (restore) {
+      const frame = window.requestAnimationFrame(() => {
+        element.scrollTop = Math.min(
+          restore.top,
+          Math.max(0, element.scrollHeight - element.clientHeight),
+        );
+        element.scrollLeft = restore.left;
+        setTableViewport({ top: element.scrollTop, height: element.clientHeight });
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
     element.scrollTop = 0;
+    element.scrollLeft = 0;
     setTableViewport({ top: 0, height: element.clientHeight });
   }, [
     data,
@@ -2804,7 +2846,14 @@ function App() {
     const previous = historyRef.current.pop();
     const current = currentSnapshot();
     if (!previous || !current) return;
+    const element = tableWrapRef.current;
+    if (element)
+      tableScrollRestoreRef.current = {
+        top: element.scrollTop,
+        left: element.scrollLeft,
+      };
     futureRef.current = [...futureRef.current, current].slice(-100);
+    workspaceRevisionRef.current += 1;
     setData(previous.data);
     setTags(previous.tags);
     setAnnotations(previous.annotations);
@@ -2821,7 +2870,14 @@ function App() {
     const next = futureRef.current.pop();
     const current = currentSnapshot();
     if (!next || !current) return;
+    const element = tableWrapRef.current;
+    if (element)
+      tableScrollRestoreRef.current = {
+        top: element.scrollTop,
+        left: element.scrollLeft,
+      };
     historyRef.current = [...historyRef.current, current].slice(-100);
+    workspaceRevisionRef.current += 1;
     setData(next.data);
     setTags(next.tags);
     setAnnotations(next.annotations);
@@ -3776,6 +3832,7 @@ function App() {
       ) : !data ? (
         <main className="empty-state">
           <div className="empty-panel">
+            <img className="empty-brand-mark" src="/tagger-icon.svg" alt="Tagger" />
             <h1>Tagger</h1>
             <div className="empty-actions">
               <button className="primary-button" onClick={handleOpen}>
@@ -3908,12 +3965,14 @@ function App() {
                 </button>
               </div>
             </div>
-            {selectedCellPreview && (
-              <div className="cell-preview" title={selectedCellPreview.value}>
-                <span>{selectedCellPreview.header}</span>
-                <div>{selectedCellPreview.value || "空白"}</div>
-              </div>
-            )}
+            <div
+              className={`cell-preview ${selectedCellPreview ? "has-selection" : ""}`}
+              title={selectedCellPreview?.value}
+              aria-live="polite"
+            >
+              <span>{selectedCellPreview?.header}</span>
+              <div>{selectedCellPreview?.value || (selectedCellPreview ? "空白" : "")}</div>
+            </div>
             <div className="table-wrap" ref={tableWrapRef}>
               <table className="data-table">
                 <colgroup>

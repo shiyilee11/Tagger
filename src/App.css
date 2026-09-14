@@ -43,6 +43,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 
 .empty-state { flex: 1; display: grid; place-items: center; }
 .empty-panel { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+.empty-brand-mark { width: 92px; height: 92px; display: block; object-fit: contain; }
 .empty-panel h1 { margin: 0 0 3px; font-size: 28px; letter-spacing: -.05em; }
 .empty-actions { display: flex; gap: 8px; }
 .primary-button, .secondary-button, .danger-button { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; padding: 0 13px; border-radius: 7px; font-size: 12px; font-weight: 600; }
@@ -172,9 +173,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .data-table td input { width: 100%; height: 27px; padding: 0 6px; border: 1px solid var(--blue); border-radius: 4px; outline: 0; background: #fff; color: var(--text); }
 .data-table .virtual-spacer { pointer-events: none; }
 .data-table .virtual-spacer td { height: 0; padding: 0; border: 0; opacity: 0; }
-.cell-preview { min-height: 35px; display: grid; grid-template-columns: minmax(80px, 150px) minmax(0, 1fr); align-items: start; gap: 10px; padding: 7px 16px; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
+.cell-preview { height: 48px; min-height: 48px; display: grid; grid-template-columns: minmax(80px, 150px) minmax(0, 1fr); align-items: center; gap: 10px; padding: 7px 16px; overflow: hidden; border-bottom: 1px solid var(--line); background: var(--surface-muted); }
 .cell-preview > span { overflow: hidden; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
-.cell-preview > div { max-height: 56px; overflow: auto; color: var(--text); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+.cell-preview > div { max-height: 32px; overflow: auto; color: var(--text); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
 .cell-value { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
 .empty-cell { color: #b5b5ba; }
 .cell-mark { display: inline-block; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%; box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 14%, transparent); vertical-align: middle; }

@@ -451,15 +451,8 @@ mod tests {
             dataset: vec!["remove".to_string()],
         };
         let tags = HashMap::from([(keep.name.clone(), keep), (remove.name.clone(), remove)]);
-        save_tags(
-            &csv_path,
-            &TagsFile {
-                version: 1,
-                tags,
-                annotations: annotations.clone(),
-            },
-        )
-        .expect("initial tags should be written");
+        save_workspace(csv_path.clone(), tags, annotations)
+            .expect("initial workspace should be written");
 
         delete_tag(csv_path.clone(), "remove".to_string()).expect("tag should be deleted");
         let result = load_tags(&csv_path);
