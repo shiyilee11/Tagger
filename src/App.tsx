@@ -16,7 +16,13 @@ import {
   readTextFile,
   stat,
 } from "@tauri-apps/plugin-fs";
-import type { Annotations, ParsedData, Tag, WorkspaceLayout } from "./types";
+import type {
+  AnnotationTimestamps,
+  Annotations,
+  ParsedData,
+  Tag,
+  WorkspaceLayout,
+} from "./types";
 import { parseDelimited, parseDelimitedFile as parseDelimitedFileOnMain } from "./csvParser";
 import "./App.css";
 
@@ -95,6 +101,12 @@ const EMPTY_ANNOTATIONS: Annotations = {
   cells: {},
   columns: {},
   dataset: [],
+  timestamps: {
+    rows: {},
+    cells: {},
+    columns: {},
+    dataset: {},
+  },
 };
 const ARCHIVE_KEY = "tagger-archives-v1";
 const ARCHIVE_IDB_MARKER = "tagger-archives-idb-v1";
@@ -132,7 +144,13 @@ const TAG_TEMPLATE = `{
     "rows": {},
     "cells": {},
     "columns": {},
-    "dataset": []
+    "dataset": [],
+    "timestamps": {
+      "rows": {},
+      "cells": {},
+      "columns": {},
+      "dataset": {}
+    }
   }
 }`;
 
@@ -143,6 +161,12 @@ const makeEmptyAnnotations = (): Annotations => ({
   cells: {},
   columns: {},
   dataset: [],
+  timestamps: {
+    rows: {},
+    cells: {},
+    columns: {},
+    dataset: {},
+  },
 });
 const makeEmptyFilters = (): WorkspaceFilters => ({
   hiddenColumns: [],
@@ -469,21 +493,62 @@ function serializeTagsExport(
   annotations: Annotations,
   layout: WorkspaceLayout = makeEmptyLayout(),
 ) {
+  const exportedAt = new Date().toISOString();
+  const normalizedAnnotations = normalizeAnnotations(annotations);
   return JSON.stringify(
     {
       schema: "tagger.tags/v1",
       version: 1,
+      exported_at: exportedAt,
       source: {
         file: sourceFileName,
         delimiter: delimiter === "\t" ? "tab" : "comma",
       },
       tags,
-      annotations,
+      annotations: normalizedAnnotations,
+      annotation_events: buildAnnotationEvents(normalizedAnnotations),
       layout: cloneLayout(layout),
     },
     null,
     2,
   );
+}
+
+function buildAnnotationEvents(annotations: Annotations) {
+  const events: Array<Record<string, string>> = [];
+  const add = (
+    scope: string,
+    tag: string,
+    timestamp: string,
+    extra: Record<string, string> = {},
+  ) => {
+    if (timestamp) events.push({ scope, tag, timestamp, ...extra });
+  };
+  Object.entries(annotations.timestamps.rows).forEach(([rowId, values]) => {
+    const tags = annotations.rows[rowId] ?? [];
+    Object.entries(values).forEach(([tag, timestamp]) => {
+      if (tags.includes(tag)) add("row", tag, timestamp, { row_id: rowId });
+    });
+  });
+  Object.entries(annotations.timestamps.cells).forEach(([rowId, columns]) => {
+    Object.entries(columns).forEach(([column, values]) => {
+      const tags = annotations.cells[rowId]?.[column] ?? [];
+      Object.entries(values).forEach(([tag, timestamp]) => {
+        if (tags.includes(tag))
+          add("cell", tag, timestamp, { row_id: rowId, column });
+      });
+    });
+  });
+  Object.entries(annotations.timestamps.columns).forEach(([column, values]) => {
+    const tags = annotations.columns[column] ?? [];
+    Object.entries(values).forEach(([tag, timestamp]) => {
+      if (tags.includes(tag)) add("column", tag, timestamp, { column });
+    });
+  });
+  Object.entries(annotations.timestamps.dataset).forEach(([tag, timestamp]) => {
+    if (annotations.dataset.includes(tag)) add("dataset", tag, timestamp);
+  });
+  return events;
 }
 
 function crc32(bytes: Uint8Array) {
@@ -594,6 +659,7 @@ function createArchiveBundle(slots: ArchiveSlot[]) {
 }
 
 function cloneAnnotations(source: Annotations): Annotations {
+  const timestamps = normalizeAnnotationTimestamps(source.timestamps);
   return {
     rows: Object.fromEntries(
       Object.entries(source.rows).map(([key, value]) => [key, [...value]]),
@@ -610,6 +676,23 @@ function cloneAnnotations(source: Annotations): Annotations {
       Object.entries(source.columns).map(([key, value]) => [key, [...value]]),
     ),
     dataset: [...source.dataset],
+    timestamps: {
+      rows: Object.fromEntries(
+        Object.entries(timestamps.rows).map(([key, value]) => [key, { ...value }]),
+      ),
+      cells: Object.fromEntries(
+        Object.entries(timestamps.cells).map(([row, columns]) => [
+          row,
+          Object.fromEntries(
+            Object.entries(columns).map(([column, value]) => [column, { ...value }]),
+          ),
+        ]),
+      ),
+      columns: Object.fromEntries(
+        Object.entries(timestamps.columns).map(([key, value]) => [key, { ...value }]),
+      ),
+      dataset: { ...timestamps.dataset },
+    },
   };
 }
 
@@ -625,6 +708,44 @@ function cloneTags(source: Record<string, Tag>): Record<string, Tag> {
   return Object.fromEntries(
     Object.entries(source).map(([name, tag]) => [name, { ...tag }]),
   );
+}
+
+function normalizeAnnotationTimestamps(value: unknown): AnnotationTimestamps {
+  if (!value || typeof value !== "object")
+    return makeEmptyAnnotations().timestamps;
+  const source = value as Record<string, unknown>;
+  const toTimestampMap = (item: unknown): Record<string, string> => {
+    if (!item || typeof item !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(item as Record<string, unknown>).flatMap(([key, timestamp]) =>
+        typeof timestamp === "string" && timestamp ? [[key, timestamp]] : [],
+      ),
+    );
+  };
+  const toNestedTimestampMap = (item: unknown) => {
+    if (!item || typeof item !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(item as Record<string, unknown>).map(([key, values]) => [
+        key,
+        toTimestampMap(values),
+      ]),
+    );
+  };
+  const rawCells = source.cells;
+  const cells =
+    rawCells && typeof rawCells === "object"
+      ? Object.fromEntries(
+          Object.entries(rawCells as Record<string, unknown>).map(
+            ([row, columns]) => [row, toNestedTimestampMap(columns)],
+          ),
+        )
+      : {};
+  return {
+    rows: toNestedTimestampMap(source.rows),
+    cells,
+    columns: toNestedTimestampMap(source.columns),
+    dataset: toTimestampMap(source.dataset),
+  };
 }
 
 function normalizeAnnotations(value: unknown): Annotations {
@@ -656,6 +777,9 @@ function normalizeAnnotations(value: unknown): Annotations {
     cells,
     columns: toMap(source.columns),
     dataset: toList(source.dataset),
+    timestamps: normalizeAnnotationTimestamps(
+      source.timestamps ?? source.annotation_timestamps,
+    ),
   };
 }
 
@@ -1795,13 +1919,14 @@ function App() {
       setShowSaveDialog(false);
       historyRef.current = [];
       futureRef.current = [];
+      const savedAnnotations = normalizeAnnotations(saved.annotations);
       setData(saved.data);
       setFileName(saved.fileName);
       setFilePath(saved.filePath);
       setDelimiter(saved.delimiter);
       setFileSizeBytes(saved.sizeBytes ?? 0);
       setTags(saved.tags);
-      setAnnotations(saved.annotations);
+      setAnnotations(savedAnnotations);
       setLayout(cloneLayout(saved.layout));
       setEditorMode("tagger");
       setCapturingShortcut(null);
@@ -1820,7 +1945,7 @@ function App() {
       savedSnapshotRef.current = {
         data: cloneData(saved.data),
         tags: cloneTags(saved.tags),
-        annotations: cloneAnnotations(saved.annotations),
+        annotations: cloneAnnotations(savedAnnotations),
         layout: cloneLayout(saved.layout),
         filters: savedFilters,
       };
@@ -2446,6 +2571,7 @@ function App() {
     scope: Scope,
     tagName: string,
     remove: boolean,
+    timestamp = "",
   ) => {
     if (!isDesktop() || !filePath || !data) return;
     const calls: Promise<unknown>[] = [];
@@ -2466,6 +2592,7 @@ function App() {
                 rowId: `row-${row}`,
                 column: data.headers[column],
                 tagName,
+                timestamp,
               },
           ),
         ),
@@ -2493,7 +2620,12 @@ function App() {
                   target: `row-${row}`,
                   tagName,
                 }
-              : { csvPath: filePath, rowId: `row-${row}`, tagName },
+              : {
+                  csvPath: filePath,
+                  rowId: `row-${row}`,
+                  tagName,
+                  timestamp,
+                },
             ),
           ),
         ),
@@ -2511,7 +2643,12 @@ function App() {
                   target: data.headers[column],
                   tagName,
                 }
-              : { csvPath: filePath, column: data.headers[column], tagName },
+              : {
+                  csvPath: filePath,
+                  column: data.headers[column],
+                  tagName,
+                  timestamp,
+                },
             ),
           ),
         ),
@@ -2528,7 +2665,7 @@ function App() {
                 target: "dataset",
                 tagName,
               }
-            : { csvPath: filePath, tagName },
+            : { csvPath: filePath, tagName, timestamp },
           ),
         ),
       );
@@ -2539,14 +2676,27 @@ function App() {
     async (tagName: string, remove = false) => {
       if (!data) return;
       const next = cloneAnnotations(annotations);
+      const timestamp = new Date().toISOString();
+      const updateTag = (
+        list: string[],
+        timestampMap: Record<string, string>,
+      ) => {
+        const wasPresent = list.includes(tagName);
+        const updated = toggleTag(list, tagName, remove);
+        if (remove) delete timestampMap[tagName];
+        else if (!wasPresent || !timestampMap[tagName])
+          timestampMap[tagName] = timestamp;
+        return updated;
+      };
       const applyCell = (row: number, column: number) => {
         const id = `row-${row}`;
         const header = data.headers[column];
         next.cells[id] ??= {};
-        next.cells[id][header] = toggleTag(
+        next.timestamps.cells[id] ??= {};
+        next.timestamps.cells[id][header] ??= {};
+        next.cells[id][header] = updateTag(
           next.cells[id][header] ?? [],
-          tagName,
-          remove,
+          next.timestamps.cells[id][header],
         );
       };
       if ((currentScope === "cell" || currentScope === "range") && rangeBounds)
@@ -2559,28 +2709,30 @@ function App() {
             applyCell(row, column);
       else if (currentScope === "row")
         selectedRows.forEach((row) => {
-          next.rows[`row-${row}`] = toggleTag(
+          const id = `row-${row}`;
+          next.timestamps.rows[id] ??= {};
+          next.rows[id] = updateTag(
             next.rows[`row-${row}`] ?? [],
-            tagName,
-            remove,
+            next.timestamps.rows[id],
           );
         });
       else if (currentScope === "column")
         selectedColumns.forEach((column) => {
           const header = data.headers[column];
-          next.columns[header] = toggleTag(
+          next.timestamps.columns[header] ??= {};
+          next.columns[header] = updateTag(
             next.columns[header] ?? [],
-            tagName,
-            remove,
+            next.timestamps.columns[header],
           );
         });
-      else next.dataset = toggleTag(next.dataset, tagName, remove);
+      else
+        next.dataset = updateTag(next.dataset, next.timestamps.dataset);
       rememberChange();
       setAnnotations(next);
       setIsDirty(true);
       persistBrowserState(tags, next);
       try {
-        await invokeAnnotation(currentScope, tagName, remove);
+        await invokeAnnotation(currentScope, tagName, remove, timestamp);
       } catch (error) {
         showNotice(`保存失败：${String(error)}`);
       }
@@ -2631,6 +2783,17 @@ function App() {
           );
         }),
       );
+      const renameTimestamp = (values: Record<string, string>) => {
+        if (values[originalName] && !values[name])
+          values[name] = values[originalName];
+        delete values[originalName];
+      };
+      Object.values(nextAnnotations.timestamps.rows).forEach(renameTimestamp);
+      Object.values(nextAnnotations.timestamps.columns).forEach(renameTimestamp);
+      Object.values(nextAnnotations.timestamps.cells).forEach((columns) =>
+        Object.values(columns).forEach(renameTimestamp),
+      );
+      renameTimestamp(nextAnnotations.timestamps.dataset);
       setAnnotations(nextAnnotations);
     }
     nextTags[name] = nextTag;
@@ -2673,6 +2836,18 @@ function App() {
         ].filter((item) => item !== name);
       }),
     );
+    Object.values(nextAnnotations.timestamps.rows).forEach((values) => {
+      delete values[name];
+    });
+    Object.values(nextAnnotations.timestamps.columns).forEach((values) => {
+      delete values[name];
+    });
+    Object.values(nextAnnotations.timestamps.cells).forEach((columns) =>
+      Object.values(columns).forEach((values) => {
+        delete values[name];
+      }),
+    );
+    delete nextAnnotations.timestamps.dataset[name];
     rememberChange();
     setTags(nextTags);
     setAnnotations(nextAnnotations);
@@ -3077,8 +3252,13 @@ function App() {
     const clearCell = (row: number, column: number) => {
       const id = `row-${row}`;
       const header = data.headers[column];
-      if (next.cells[id]?.[header]?.length) {
+      const hadTags = !!next.cells[id]?.[header]?.length;
+      const hadTimestamps = !!next.timestamps.cells[id]?.[header];
+      if (hadTags || hadTimestamps) {
+        next.cells[id] ??= {};
         next.cells[id][header] = [];
+        if (next.timestamps.cells[id])
+          delete next.timestamps.cells[id][header];
         changed = true;
       }
     };
@@ -3093,16 +3273,18 @@ function App() {
     else if (selectedRows.size)
       selectedRows.forEach((row) => {
         const id = `row-${row}`;
-        if (next.rows[id]?.length) {
+        if (next.rows[id]?.length || next.timestamps.rows[id]) {
           next.rows[id] = [];
+          delete next.timestamps.rows[id];
           changed = true;
         }
       });
     else if (selectedColumns.size)
       selectedColumns.forEach((column) => {
         const header = data.headers[column];
-        if (next.columns[header]?.length) {
+        if (next.columns[header]?.length || next.timestamps.columns[header]) {
           next.columns[header] = [];
+          delete next.timestamps.columns[header];
           changed = true;
         }
       });

@@ -160,7 +160,7 @@ Tagger 会根据你的选择自动判断标注范围：
 | ----------- | --------------- | ---------------- |
 | 📦 配套 ZIP | `.zip`   | 包含 CSV/TSV、标签 JSON 和样例 JSON，可重新导入       |
 | 📄 只导出 CSV  | `.csv` / `.tsv` | 给其他工具使用          |
-| 🏷️ 只导出标签   | `.tags.json`    | 给 AI / Python 分析 |
+| 🏷️ 只导出标签   | `.tags.json`    | 给 AI / Python 分析，包含每个标注的 ISO 8601 时间戳 |
 
 
 ---
@@ -216,6 +216,7 @@ records.tags.json     ← 标签定义 + 标注位置
 ```
 
 CSV 保持干净，标签独立存储。用 Excel 打开 CSV 看不到标签，但 Tagger 可以同时读取两者恢复完整状态。
+标签 JSON 的 `annotations.timestamps` 保存表格、行、列和单元格级别的标注时间；`annotation_events` 是按条目展开的时间事件，便于大模型直接读取。
 
 ---
 

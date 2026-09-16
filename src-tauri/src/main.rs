@@ -23,11 +23,21 @@ pub struct Tag {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AnnotationTimestamps {
+    pub rows: HashMap<String, HashMap<String, String>>,
+    pub cells: HashMap<String, HashMap<String, HashMap<String, String>>>,
+    pub columns: HashMap<String, HashMap<String, String>>,
+    pub dataset: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Annotations {
     pub rows: HashMap<String, Vec<String>>,
     pub cells: HashMap<String, HashMap<String, Vec<String>>>,
     pub columns: HashMap<String, Vec<String>>,
     pub dataset: Vec<String>,
+    #[serde(default)]
+    pub timestamps: AnnotationTimestamps,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +143,16 @@ fn save_tags(csv_path: &str, tags_file: &TagsFile) -> Result<(), String> {
     let temporary_path = format!("{path}.tmp");
     std::fs::write(&temporary_path, json).map_err(|e| e.to_string())?;
     std::fs::rename(&temporary_path, &path).map_err(|e| e.to_string())
+}
+
+fn rename_timestamp(
+    timestamps: &mut HashMap<String, String>,
+    old_name: &str,
+    new_name: &str,
+) {
+    if let Some(timestamp) = timestamps.remove(old_name) {
+        timestamps.entry(new_name.to_string()).or_insert(timestamp);
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -299,6 +319,22 @@ fn update_tag(
             }
         }
         replace(&mut tf.annotations.dataset);
+        for timestamps in tf.annotations.timestamps.rows.values_mut() {
+            rename_timestamp(timestamps, &old_name, &name);
+        }
+        for timestamps in tf.annotations.timestamps.columns.values_mut() {
+            rename_timestamp(timestamps, &old_name, &name);
+        }
+        for cells in tf.annotations.timestamps.cells.values_mut() {
+            for timestamps in cells.values_mut() {
+                rename_timestamp(timestamps, &old_name, &name);
+            }
+        }
+        rename_timestamp(
+            &mut tf.annotations.timestamps.dataset,
+            &old_name,
+            &name,
+        );
     }
     tf.tags.insert(name.clone(), Tag { name, definition, color, shortcut });
     save_tags(&csv_path, &tf)
@@ -322,17 +358,41 @@ fn delete_tag(csv_path: String, name: String) -> Result<(), String> {
         tags.retain(|t| t != &name);
     }
     tf.annotations.dataset.retain(|t| t != &name);
+    for timestamps in tf.annotations.timestamps.rows.values_mut() {
+        timestamps.remove(&name);
+    }
+    for timestamps in tf.annotations.timestamps.columns.values_mut() {
+        timestamps.remove(&name);
+    }
+    for cells in tf.annotations.timestamps.cells.values_mut() {
+        for timestamps in cells.values_mut() {
+            timestamps.remove(&name);
+        }
+    }
+    tf.annotations.timestamps.dataset.remove(&name);
     save_tags(&csv_path, &tf)
 }
 
 #[tauri::command]
-fn annotate_row(csv_path: String, row_id: String, tag_name: String) -> Result<(), String> {
+fn annotate_row(
+    csv_path: String,
+    row_id: String,
+    tag_name: String,
+    timestamp: String,
+) -> Result<(), String> {
     let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
-    let entry = tf.annotations.rows.entry(row_id).or_default();
+    let entry = tf.annotations.rows.entry(row_id.clone()).or_default();
     if !entry.contains(&tag_name) {
-        entry.push(tag_name);
+        entry.push(tag_name.clone());
     }
+    tf.annotations
+        .timestamps
+        .rows
+        .entry(row_id)
+        .or_default()
+        .entry(tag_name)
+        .or_insert(timestamp);
     save_tags(&csv_path, &tf)
 }
 
@@ -342,35 +402,66 @@ fn annotate_cell(
     row_id: String,
     column: String,
     tag_name: String,
+    timestamp: String,
 ) -> Result<(), String> {
     let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
-    let row_entry = tf.annotations.cells.entry(row_id).or_default();
-    let col_entry = row_entry.entry(column).or_default();
+    let row_entry = tf.annotations.cells.entry(row_id.clone()).or_default();
+    let col_entry = row_entry.entry(column.clone()).or_default();
     if !col_entry.contains(&tag_name) {
-        col_entry.push(tag_name);
+        col_entry.push(tag_name.clone());
     }
+    tf.annotations
+        .timestamps
+        .cells
+        .entry(row_id)
+        .or_default()
+        .entry(column)
+        .or_default()
+        .entry(tag_name)
+        .or_insert(timestamp);
     save_tags(&csv_path, &tf)
 }
 
 #[tauri::command]
-fn annotate_column(csv_path: String, column: String, tag_name: String) -> Result<(), String> {
+fn annotate_column(
+    csv_path: String,
+    column: String,
+    tag_name: String,
+    timestamp: String,
+) -> Result<(), String> {
     let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
-    let entry = tf.annotations.columns.entry(column).or_default();
+    let entry = tf.annotations.columns.entry(column.clone()).or_default();
     if !entry.contains(&tag_name) {
-        entry.push(tag_name);
+        entry.push(tag_name.clone());
     }
+    tf.annotations
+        .timestamps
+        .columns
+        .entry(column)
+        .or_default()
+        .entry(tag_name)
+        .or_insert(timestamp);
     save_tags(&csv_path, &tf)
 }
 
 #[tauri::command]
-fn annotate_dataset(csv_path: String, tag_name: String) -> Result<(), String> {
+fn annotate_dataset(
+    csv_path: String,
+    tag_name: String,
+    timestamp: String,
+) -> Result<(), String> {
     let _lock = TAG_WRITE_LOCK.lock().map_err(|e| e.to_string())?;
     let mut tf = load_tags(&csv_path);
     if !tf.annotations.dataset.contains(&tag_name) {
-        tf.annotations.dataset.push(tag_name);
+        tf.annotations.dataset.push(tag_name.clone());
     }
+    tf.annotations
+        .timestamps
+        .dataset
+        .entry(tag_name)
+        .or_insert(timestamp);
     save_tags(&csv_path, &tf)
 }
 
@@ -388,14 +479,21 @@ fn remove_annotation(
             if let Some(tags) = tf.annotations.rows.get_mut(&target) {
                 tags.retain(|t| t != &tag_name);
             }
+            if let Some(timestamps) = tf.annotations.timestamps.rows.get_mut(&target) {
+                timestamps.remove(&tag_name);
+            }
         }
         "column" => {
             if let Some(tags) = tf.annotations.columns.get_mut(&target) {
                 tags.retain(|t| t != &tag_name);
             }
+            if let Some(timestamps) = tf.annotations.timestamps.columns.get_mut(&target) {
+                timestamps.remove(&tag_name);
+            }
         }
         "dataset" => {
             tf.annotations.dataset.retain(|t| t != &tag_name);
+            tf.annotations.timestamps.dataset.remove(&tag_name);
         }
         "cell" => {
             // target format: "row_id:column"
@@ -403,6 +501,11 @@ fn remove_annotation(
                 if let Some(cells) = tf.annotations.cells.get_mut(row_id) {
                     if let Some(tags) = cells.get_mut(col) {
                         tags.retain(|t| t != &tag_name);
+                    }
+                }
+                if let Some(cells) = tf.annotations.timestamps.cells.get_mut(row_id) {
+                    if let Some(timestamps) = cells.get_mut(col) {
+                        timestamps.remove(&tag_name);
                     }
                 }
             }
@@ -419,18 +522,39 @@ fn export_for_ai(csv_path: String) -> Result<serde_json::Value, String> {
     let mut annotations = Vec::new();
 
     for (row_id, tags) in &tf.annotations.rows {
-        annotations.push(serde_json::json!({ "row_id": row_id, "tags": tags }));
+        annotations.push(serde_json::json!({
+            "row_id": row_id,
+            "tags": tags,
+            "timestamps": tf.annotations.timestamps.rows.get(row_id).cloned().unwrap_or_default(),
+        }));
     }
     for (row_id, cells) in &tf.annotations.cells {
         for (column, tags) in cells {
-            annotations.push(serde_json::json!({ "row_id": row_id, "column": column, "tags": tags }));
+            annotations.push(serde_json::json!({
+                "row_id": row_id,
+                "column": column,
+                "tags": tags,
+                "timestamps": tf.annotations.timestamps.cells
+                    .get(row_id)
+                    .and_then(|columns| columns.get(column))
+                    .cloned()
+                    .unwrap_or_default(),
+            }));
         }
     }
     for (column, tags) in &tf.annotations.columns {
-        annotations.push(serde_json::json!({ "column": column, "tags": tags }));
+        annotations.push(serde_json::json!({
+            "column": column,
+            "tags": tags,
+            "timestamps": tf.annotations.timestamps.columns.get(column).cloned().unwrap_or_default(),
+        }));
     }
     if !tf.annotations.dataset.is_empty() {
-        annotations.push(serde_json::json!({ "dataset": true, "tags": tf.annotations.dataset }));
+        annotations.push(serde_json::json!({
+            "dataset": true,
+            "tags": tf.annotations.dataset,
+            "timestamps": tf.annotations.timestamps.dataset,
+        }));
     }
 
     let tag_defs: serde_json::Value = tf
@@ -448,7 +572,8 @@ fn export_for_ai(csv_path: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "dataset": { "file": csv_path, "description": "" },
         "tag_definitions": tag_defs,
-        "annotations": annotations
+        "annotations": annotations,
+        "annotation_timestamps": tf.annotations.timestamps,
     }))
 }
 
@@ -500,6 +625,7 @@ mod tests {
                 vec!["remove".to_string()],
             )]),
             dataset: vec!["remove".to_string()],
+            timestamps: AnnotationTimestamps::default(),
         };
         let tags = HashMap::from([(keep.name.clone(), keep), (remove.name.clone(), remove)]);
         save_workspace(
@@ -540,6 +666,63 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).expect("export should be readable"), content);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn annotation_timestamp_is_saved_and_removed_with_tag() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "tagger-timestamp-{suffix}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("test directory should be created");
+        let csv_path = directory.join("sample.csv").to_string_lossy().into_owned();
+
+        save_workspace(
+            csv_path.clone(),
+            HashMap::new(),
+            Annotations::default(),
+            WorkspaceLayout::default(),
+        )
+        .expect("workspace should be written");
+        annotate_cell(
+            csv_path.clone(),
+            "row-0".to_string(),
+            "text".to_string(),
+            "keep".to_string(),
+            "2026-09-16T10:20:30.000Z".to_string(),
+        )
+        .expect("annotation should be written");
+        annotate_cell(
+            csv_path.clone(),
+            "row-0".to_string(),
+            "text".to_string(),
+            "keep".to_string(),
+            "2026-09-16T10:20:31.000Z".to_string(),
+        )
+        .expect("duplicate annotation should be harmless");
+
+        let saved = load_tags(&csv_path);
+        assert_eq!(
+            saved.annotations.timestamps.cells["row-0"]["text"]["keep"],
+            "2026-09-16T10:20:30.000Z"
+        );
+
+        remove_annotation(
+            csv_path.clone(),
+            "cell".to_string(),
+            "row-0:text".to_string(),
+            "keep".to_string(),
+        )
+        .expect("annotation should be removed");
+        let removed = load_tags(&csv_path);
+        assert!(!removed.annotations.timestamps.cells["row-0"]["text"]
+            .contains_key("keep"));
+
+        let _ = std::fs::remove_dir_all(directory);
     }
 }
 

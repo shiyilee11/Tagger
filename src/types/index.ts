@@ -10,6 +10,14 @@ export interface Annotations {
   cells: Record<string, Record<string, string[]>>;
   columns: Record<string, string[]>;
   dataset: string[];
+  timestamps: AnnotationTimestamps;
+}
+
+export interface AnnotationTimestamps {
+  rows: Record<string, Record<string, string>>;
+  cells: Record<string, Record<string, Record<string, string>>>;
+  columns: Record<string, Record<string, string>>;
+  dataset: Record<string, string>;
 }
 
 export interface ParsedData {
